@@ -30,9 +30,7 @@ class StubPostProcessor:
             yield OutputSegment(
                 chunk_id=d.chunk_id,
                 text=d.result.raw_text,
-                start_time=d.result.timing_ms.get("_start", 0.0) if isinstance(
-                    d.result.timing_ms.get("_start"), float
-                ) else 0.0,
-                end_time=0.0,
+                start_time=d.start_time,
+                end_time=d.end_time,
                 low_confidence=d.low_confidence,
             )

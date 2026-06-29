@@ -10,7 +10,19 @@ from eval.metrics import compute_chrf_stub
 from eval.report import write_report
 
 
-def run_eval(eval_set: Path, target_lang: str) -> str:
+def run_eval(
+    eval_set: Path,
+    target_lang: str,
+    output_dir: Path | str | None = None,
+) -> str:
+    """Run the eval harness.
+
+    Args:
+        eval_set: directory of *.wav clips (with sibling *.txt references).
+        target_lang: target language code (eng|ara|fra).
+        output_dir: where to write the report. Defaults to ``outputs/`` in the
+            current working directory. Tests should pass an explicit tmp dir.
+    """
     clips = sorted(eval_set.glob("*.wav"))
     scored = []
     for wav in clips:
@@ -31,5 +43,6 @@ def run_eval(eval_set: Path, target_lang: str) -> str:
             ) if scored else 0.0,
         },
     }
-    out_path = Path("outputs") / f"eval-{target_lang}.json"
+    out_dir = Path(output_dir) if output_dir is not None else Path("outputs")
+    out_path = out_dir / f"eval-{target_lang}.json"
     return write_report(out_path, report)

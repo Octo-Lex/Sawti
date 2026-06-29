@@ -37,12 +37,19 @@ class EngineResult:
 
 @dataclass
 class GateDecision:
-    """The quality gate's verdict on an EngineResult."""
+    """The quality gate's verdict on an EngineResult.
+
+    start_time/end_time echo the source AudioChunk's timing so the
+    postprocessor can emit correctly timestamped OutputSegments without
+    needing direct access to the chunk.
+    """
 
     chunk_id: str
     accepted: bool
     result: EngineResult
     checks: dict
+    start_time: float = 0.0
+    end_time: float = 0.0
     fallback_path: str | None = None  # None | "retry" | "rechunk" | "asr_mt"
     low_confidence: bool = False
     needs_retry: bool = False

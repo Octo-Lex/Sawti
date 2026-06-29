@@ -37,6 +37,8 @@ class StubQualityGate:
             accepted=not low,
             result=result,
             checks={"confidence": low},
+            start_time=chunk.start_time,
+            end_time=chunk.end_time,
             fallback_path="retry" if low else None,
             low_confidence=low,
             needs_retry=low,

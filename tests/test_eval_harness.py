@@ -17,8 +17,10 @@ def test_chrf_stub_lower_for_mismatch():
 
 
 def test_run_eval_writes_report(tmp_path: Path):
-    # empty eval set; harness skeleton should still produce a report file
-    report_path = run_eval(tmp_path, target_lang="eng")
+    # empty eval set; harness skeleton should still produce a report file.
+    # output_dir is pointed at tmp_path so no artifact is written to the
+    # repo working tree.
+    report_path = run_eval(tmp_path, target_lang="eng", output_dir=tmp_path)
     assert Path(report_path).exists()
     data = json.loads(Path(report_path).read_text(encoding="utf-8"))
     assert data["target_lang"] == "eng"
