@@ -1,0 +1,51 @@
+# Default Sawti runtime config (spec §2.3, §3.3, §3.8, §4.6).
+target_lang: eng
+
+segmentation:
+  pause_threshold_ms: 350
+  max_chunk_duration_s: 12
+  min_chunk_duration_ms: 600
+  overlap_ms: 300
+  min_speech_ms: 300
+  min_gap_ms: 100
+
+s2tt:
+  engine: seamless_m4t
+  target_lang: eng
+  load_policy: resident
+  idle_unload_seconds: 300
+  device: cuda
+
+quality_gate:
+  policy: balanced
+  confidence_threshold: 0.40
+  retry_once: true
+  rechunk_on_failure: true
+  fallback_to_asr_mt: true
+  checks:
+    empty_output: true
+    garbage_output: true
+    script_mismatch: true
+    length_ratio_anomaly: true
+    repetition_loop: true
+  length_ratio:
+    min_chars_per_audio_second: 0.5
+    max_chars_per_audio_second: 35.0
+  retries:
+    max_s2tt_retries: 1
+    max_rechunk_attempts: 1
+  script_mismatch_strictness:
+    eng: soft
+    fra: soft
+    ara: strict
+
+postprocess:
+  dedup_overlap: true
+  collapse_repeats: true
+  repeat_min_count: 3
+  normalize_script: true
+  repair_punctuation: true
+  preserve_arabic_diacritics: true
+  arabic_alef_normalization: matching_only
+  arabic_yeh_maqsura_normalization: matching_only
+  fuzzy_overlap: false
