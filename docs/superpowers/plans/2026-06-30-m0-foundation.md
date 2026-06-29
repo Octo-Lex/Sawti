@@ -583,7 +583,7 @@ from sawti.logging_setup import configure_logging, get_logger
 
 def test_logger_emits_jsonl():
     buf = io.StringIO()
-    configure_logging(stream=buf)
+    configure_logging(stream=buf, force=True)  # order-independent: reset first
     log = get_logger("test")
     log.info("chunk", chunk_id="c0", confidence=0.7)
     line = buf.getvalue().strip()
@@ -615,14 +615,17 @@ import structlog
 _configured = False
 
 
-def configure_logging(stream=None) -> None:
+def configure_logging(stream=None, *, force: bool = False) -> None:
     """Configure structlog to emit one JSON object per line.
 
-    Idempotent: safe to call multiple times.
+    Idempotent by default: safe to call multiple times in normal use. Tests
+    may pass ``force=True`` to reset structlog state and reconfigure with a
+    custom ``stream`` (e.g. an io.StringIO) regardless of prior calls.
     """
     global _configured
-    if _configured:
+    if _configured and not force:
         return
+    structlog.reset_defaults()
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -632,7 +635,7 @@ def configure_logging(stream=None) -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO+
         logger_factory=structlog.PrintLoggerFactory(file=stream or sys.stderr),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=False,
     )
     _configured = True
 
@@ -641,6 +644,8 @@ def get_logger(name: str | None = None):
     configure_logging()
     return structlog.get_logger(name)
 ```
+
+Note on the test below: it must call `configure_logging(stream=buf, force=True)` so it is order-independent and unaffected by any earlier global configuration.
 
 - [ ] **Step 4: Run test to verify it passes**
 

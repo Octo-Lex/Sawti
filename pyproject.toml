@@ -1,0 +1,31 @@
+[project]
+name = "sawti"
+version = "0.0.1"
+description = "Multilingual speech-to-text translation: speak in any supported language or a code-switched mix, receive text in a pre-selected target language."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "structlog>=24.1",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+sawti = "sawti.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
