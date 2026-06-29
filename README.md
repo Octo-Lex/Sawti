@@ -49,6 +49,15 @@ target-language text stream
 🚧 Early design phase. See the design specification under
 `docs/superpowers/specs/` for the full architecture.
 
+## Running (M0)
+
+```bash
+uv sync
+uv run pytest                       # run the test suite
+uv run sawti transcribe --target eng   # stub pipeline demo
+uv run sawti eval tests/fixtures --target eng  # eval harness skeleton
+```
+
 ## License
 
 To be determined.
