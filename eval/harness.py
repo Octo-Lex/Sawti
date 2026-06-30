@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from eval.metrics import compute_chrf_stub
+from eval.metrics import compute_chrf
 from eval.report import write_report
 
 
@@ -29,7 +29,7 @@ def run_eval(
         ref_path = wav.with_suffix(".txt")
         ref = ref_path.read_text(encoding="utf-8").strip() if ref_path.exists() else ""
         hyp = "[stub hypothesis]"  # M1: run real pipeline on `wav`
-        chrf = compute_chrf_stub(hyp, ref) if ref else None
+        chrf = compute_chrf(hyp, ref) if ref else None
         scored.append({"clip": wav.name, "chrf": chrf, "has_reference": bool(ref)})
 
     report = {

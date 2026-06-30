@@ -26,3 +26,16 @@ def test_run_eval_writes_report(tmp_path: Path):
     assert data["target_lang"] == "eng"
     assert "clips" in data
     assert "metrics" in data
+
+
+from eval.metrics import compute_chrf
+
+
+def test_real_chrf_perfect_match_scores_high():
+    assert compute_chrf("hello world", "hello world") > 90.0
+
+
+def test_real_chrf_mismatch_scores_lower_than_match():
+    match = compute_chrf("hello world", "hello world")
+    miss = compute_chrf("hello world", "completely different text here")
+    assert miss < match
