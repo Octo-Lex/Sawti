@@ -58,6 +58,28 @@ uv run sawti transcribe --target eng   # stub pipeline demo
 uv run sawti eval tests/fixtures --target eng  # eval harness skeleton
 ```
 
+## Running (M1)
+
+```bash
+uv sync
+uv run pytest                                   # unit suite (fast, hermetic)
+SAWTI_RUN_INTEGRATION=1 uv run pytest -m integration   # real-model tests (GPU, ~2.3GB download)
+uv run sawti transcribe sample.wav --target eng --engine m4t   # real pipeline
+```
+
+`--engine m4t` loads SeamlessM4T-v2-large (CUDA) and requires a real audio
+file. Without a file, or with `--engine stub`, the stub pipeline runs
+(hermetic, no model download).
+
+**M1 acceptance note:** the unit suite (hermetic) is the CI bar. The real
+SeamlessM4T integration test and the `--engine m4t` smoke are implemented
+but deferred pending first-time model download and a real speech sample:
+
+```bash
+SAWTI_RUN_INTEGRATION=1 uv run pytest -m integration
+uv run sawti transcribe path/to/speech.wav --target eng --engine m4t
+```
+
 ## License
 
 To be determined.

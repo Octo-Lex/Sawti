@@ -42,3 +42,18 @@ def weak_result(silence_chunk: AudioChunk) -> EngineResult:
         timing_ms={"engine": 5},
         target_lang="eng",
     )
+
+
+import os
+
+import pytest
+
+
+def pytest_collection_modifyitems(config, items):
+    skip_integration = pytest.mark.skip(
+        reason="set SAWTI_RUN_INTEGRATION=1 to run heavy model tests"
+    )
+    if not os.environ.get("SAWTI_RUN_INTEGRATION"):
+        for item in items:
+            if "integration" in item.keywords:
+                item.add_marker(skip_integration)
