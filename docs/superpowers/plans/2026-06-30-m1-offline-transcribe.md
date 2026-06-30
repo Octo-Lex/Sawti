@@ -2,6 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ CORRECTIONS (post-integration, 2026-06-30):** The code snippets below were
+> written before the first real-model run and contain API errors that were fixed
+> during integration testing (commit `3691537`). The committed code is the source
+> of truth. Specifically:
+> - The class is **`SeamlessM4Tv2ForSpeechToText`**, NOT `SeamlessM4Tv2ForS2T` (that shorthand does not exist in transformers).
+> - `generate_speech=False` is NOT a valid kwarg for the speech-to-text class (only the speech-to-speech class) — removed.
+> - `processor(audios=...)` is deprecated; use `processor(audio=...)` (singular).
+> - The engine wrapper now moves the model to `device` itself (callers don't need `.to(device)`).
+> - Silero VAD requires exactly **512-sample windows**; the segmenter sub-windows larger frames (see `_frame_speech_prob`).
+> - Requires `transformers>=4.41,<5` (5.x mis-parses the tokenizer), `torch` from the **cu126** index (default PyPI wheel is CPU-only), plus `tiktoken` and `protobuf`.
+> - A `.env` loader (`sawti/env.py`) corrects a broken system `HF_HOME` (literal quotes).
+
 **Goal:** Replace M0's stub components with real implementations so `sawti transcribe recording.wav --target eng` produces a timestamped target-language transcript from any audio file (EN/AR/FR source, code-switched or monolingual).
 
 **Architecture:** Each real component is added *alongside* its stub behind the same Protocol. Heavy ML models (Silero VAD, SeamlessM4T) are loaded via dependency injection so unit tests use fakes and only `@pytest.mark.integration` tests touch real models. **Frozen contracts** (`types.py`, `config.py`, `pipeline.py`) are never modified — M1 only adds new files and rewires `cli.py`/`eval`.
