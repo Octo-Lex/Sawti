@@ -8,6 +8,7 @@ from pathlib import Path
 
 import typer
 
+import sawti.env  # noqa: F401  loads .env into os.environ before HF imports
 from sawti.config import SawtiConfig, load_config
 from sawti.engine import EngineManager, StubEngine
 from sawti.logging_setup import configure_logging
@@ -37,9 +38,10 @@ def _real_pipeline(config: SawtiConfig) -> Pipeline:
     from sawti.vad import SileroVad
 
     device = config.s2tt.device
-    from transformers import AutoProcessor, SeamlessM4Tv2ForS2T
+    from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToText
     processor = AutoProcessor.from_pretrained("facebook/seamless-m4t-v2-large")
-    model = SeamlessM4Tv2ForS2T.from_pretrained("facebook/seamless-m4t-v2-large").to(device)
+    model = SeamlessM4Tv2ForSpeechToText.from_pretrained("facebook/seamless-m4t-v2-large")
+    # SeamlessM4TEngine moves the model to `device` itself.
     engine = SeamlessM4TEngine(processor=processor, model=model, device=device)
     return Pipeline(
         segmenter=RealSegmenter(vad=SileroVad(), config=config.segmentation),

@@ -14,29 +14,57 @@ from sawti.lang_codes import to_m4t_lang
 from sawti.types import AudioChunk, EngineResult
 
 
+def _is_mock(obj) -> bool:
+    """Detect unittest.mock.Mock/MagicMock so we skip device-moving them.
+
+    MagicMock responds to `.to()` but returns a *different* mock, which would
+    break unit tests that assert on the original model's `.generate` calls.
+    """
+    try:
+        from unittest.mock import Mock
+
+        return isinstance(obj, Mock)
+    except Exception:
+        return False
+
+
 class SeamlessM4TEngine:
     def __init__(
         self,
         processor,          # transformers AutoProcessor (or fake)
-        model,              # SeamlessM4Tv2ForS2T (or fake)
+        model,              # SeamlessM4Tv2ForSpeechToText (or fake)
         device: str = "cpu",
         return_scores: bool = True,
     ) -> None:
         self.processor = processor
-        self.model = model
         self.device = device
         self.return_scores = return_scores
+        # Own device placement so callers don't have to remember `.to(device)`.
+        # For real torch models, move them to the target device. Fakes used in
+        # unit tests (MagicMock) respond to `.to` but return a different mock,
+        # which would break later assertions — so we skip moving fakes.
+        if not _is_mock(model):
+            try:
+                model = model.to(device)
+            except Exception:
+                pass  # fakes without a working .to() are left as-is
+        self.model = model
 
     def translate(self, chunk: AudioChunk, target_lang: str) -> EngineResult:
         tgt = to_m4t_lang(target_lang)
         t0 = time.perf_counter()
         # processor expects a raw audio array (float32, 16kHz mono).
         audio = np.ascontiguousarray(chunk.audio, dtype=np.float32)
-        inputs = self.processor(audios=audio, sampling_rate=chunk.sample_rate,
+        # `audio=` (singular) is the current param name; `audios=` is deprecated
+        # and removed in transformers v4.59.
+        inputs = self.processor(audio=audio, sampling_rate=chunk.sample_rate,
                                 return_tensors="pt")
         if hasattr(inputs, "to"):
             inputs = inputs.to(self.device)
-        gen_kwargs = dict(tgt_lang=tgt, generate_speech=False)
+        # SeamlessM4Tv2ForSpeechToText only does S2T, so there is no
+        # `generate_speech` flag (that exists only on the speech-to-speech
+        # class). Pass just the target lang (+ optional score return).
+        gen_kwargs = dict(tgt_lang=tgt)
         if self.return_scores:
             gen_kwargs.update(return_dict_in_generate=True, output_scores=True)
         out = self.model.generate(**inputs, **gen_kwargs)

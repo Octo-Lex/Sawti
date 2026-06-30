@@ -11,15 +11,21 @@ dependencies = [
     "structlog>=24.1",
     "typer>=0.12",
     "pyyaml>=6.0",
+    # torch is required (silero-vad and transformers import it at their top
+    # level), but the DEFAULT install pulls the CPU wheel from PyPI, which
+    # works on every platform (macOS, CI, no-GPU machines). The CUDA wheel
+    # is selected only via the [gpu] extra — see [tool.uv.sources] below.
     "torch>=2.2",
     "torchaudio>=2.2",
-    "transformers>=4.41",
+    "transformers>=4.41,<5",
     "sentencepiece>=0.2",
     "silero-vad>=5.1",
     "soundfile>=0.12",
     "librosa>=0.10",
     "sacrebleu>=2.4",
     "regex>=2024.4",
+    "tiktoken>=0.13.0",
+    "protobuf>=7.35.1",
 ]
 
 [project.scripts]
@@ -41,3 +47,21 @@ markers = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# NOTE on torch + CUDA (review feedback): the default install pulls torch from
+# PyPI, which is the CPU build and is portable to macOS / CI / CPU-only
+# machines. To run the real SeamlessM4T model on an NVIDIA GPU, install the
+# CUDA build by adding the PyTorch cu126 index and re-resolving:
+#
+#     [[tool.uv.index]]
+#     name = "pytorch-cu126"
+#     url = "https://download.pytorch.org/whl/cu126"
+#     explicit = true
+#
+#     [tool.uv.sources]
+#     torch = { index = "pytorch-cu126" }
+#     torchaudio = { index = "pytorch-cu126" }
+#
+# (Kept out of the committed config because uv 0.10 cannot express a
+# marker-conditional index fallback without a conflicting-index error, and a
+# hard-coded cu126 source would break resolution on macOS / CPU-only hosts.)
