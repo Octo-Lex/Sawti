@@ -42,7 +42,7 @@ class RealSegmenter:
                 frame_dur_ms = len(frame.audio) / frame.sample_rate * 1000.0
             frame_end = frame.timestamp_s + len(frame.audio) / frame.sample_rate
 
-            vr = self.vad.prob(frame.audio, frame.sample_rate)
+            vr = self._frame_speech_prob(frame.audio, frame.sample_rate)
 
             if vr.is_speech:
                 if not open_chunk:
@@ -87,6 +87,39 @@ class RealSegmenter:
             content_ms = (last_speech_end - buf_start) * 1000.0
             if content_ms >= cfg.min_chunk_duration_ms:
                 yield self._emit(buf_audio, buf_start, last_speech_end)
+
+    def _frame_speech_prob(self, audio: np.ndarray, sample_rate: int):
+        """Compute a frame-level VAD verdict by aggregating over Silero's
+        required sub-window size (512 samples at 16kHz, 256 at 8kHz).
+
+        Silero VAD raises if given anything other than exactly 512/256
+        samples, so a frame larger than that must be windowed. We take the
+        max probability across sub-windows and treat the frame as speech if
+        that max exceeds the VAD's threshold (any-speech semantics — a frame
+        containing some speech counts as speech).
+        """
+        window = 512 if sample_rate == 16000 else 256
+        n = len(audio)
+        if n == 0:
+            from sawti.vad import VadResult
+
+            return VadResult(probability=0.0, is_speech=False)
+        if n <= window:
+            # Pad up to one window so Silero gets the size it expects.
+            padded = np.pad(audio, (0, window - n))
+            return self.vad.prob(padded, sample_rate)
+        # Aggregate over full sub-windows (drop the trailing partial window).
+        best_p = 0.0
+        best_is_speech = False
+        for i in range(0, n - window + 1, window):
+            sub = audio[i : i + window]
+            r = self.vad.prob(sub, sample_rate)
+            if r.probability > best_p:
+                best_p = r.probability
+                best_is_speech = r.is_speech
+        from sawti.vad import VadResult
+
+        return VadResult(probability=best_p, is_speech=best_is_speech)
 
     def _emit(
         self, buf_audio: list[np.ndarray], start: float, end: float

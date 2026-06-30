@@ -1,6 +1,11 @@
 """Shared pytest fixtures."""
 from __future__ import annotations
 
+# Load .env into os.environ FIRST, before any HF/transformers import tries to
+# resolve the HF cache path. The system env sets HF_HOME with literal quotes
+# that break pathlib; sawti.env loads the corrected unquoted path from .env.
+import sawti.env  # noqa: F401
+
 import numpy as np
 import pytest
 

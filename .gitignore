@@ -32,3 +32,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Local sample audio + agent harness metadata (not part of the project)
+sample/
+.agent_harnesses.json
