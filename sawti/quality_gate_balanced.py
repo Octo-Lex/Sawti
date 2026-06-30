@@ -12,9 +12,12 @@ from sawti.types import AudioChunk, EngineResult, GateDecision
 
 
 def run_checks(
-    result: EngineResult, chunk: AudioChunk, target_lang: str
+    result: EngineResult,
+    chunk: AudioChunk,
+    target_lang: str,
+    config: QualityGateConfig | None = None,
 ) -> dict[str, bool]:
-    cfg = QualityGateConfig()
+    cfg = config or QualityGateConfig()
     text = result.raw_text
     dur_s = max(chunk.duration_s, 0.001)
 
@@ -25,9 +28,9 @@ def run_checks(
     if target_lang == "ara":
         ds = dominant_script(text)
         script_mismatch = ds == "latin"  # mostly-Latin output for Arabic target
-    # length ratio: chars per audio second
+    # length ratio: chars per audio second (uses injected config bounds)
     cps = len(text) / dur_s
-    lr = QualityGateConfig().length_ratio
+    lr = cfg.length_ratio
     length_anom = cps < lr.min_chars_per_audio_second or cps > lr.max_chars_per_audio_second
     if empty:
         length_anom = False  # don't double-flag
@@ -53,7 +56,7 @@ class BalancedQualityGate:
     def evaluate(
         self, result: EngineResult, chunk: AudioChunk, target_lang: str
     ) -> GateDecision:
-        checks = run_checks(result, chunk, target_lang)
+        checks = run_checks(result, chunk, target_lang, self.config)
         low_conf = result.confidence < self.config.confidence_threshold
         any_fail = any(checks.values())
         needs_retry = any_fail or low_conf

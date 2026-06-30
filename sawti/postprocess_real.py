@@ -52,9 +52,14 @@ class RealPostProcessor:
                 if cut:
                     curr_raw = curr_raw[cut:]
                     text = " ".join(curr_raw)
-            # Steps 3-4: whitespace + punctuation repair (display side).
+            # Step 3: whitespace collapse (display side).
+            # NOTE: the config flag is named `normalize_script` for historical
+            # (M0) reasons but currently gates whitespace stripping, not script
+            # normalization. Arabic script normalization is matching-only and
+            # runs in _match_tokens, never on display text (spec §4.4).
             if self.config.normalize_script:
                 text = strip_excess_whitespace(text)
+            # Step 4: punctuation repair (display side).
             if self.config.repair_punctuation:
                 text = repair_punctuation_spacing(text)
             # Update prev-token state from this chunk's full raw tokens.
