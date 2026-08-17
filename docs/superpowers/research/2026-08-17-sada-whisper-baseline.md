@@ -116,3 +116,39 @@ rate joins WER as a first-class fine-tune metric.
 
 Caveat: greedy fp16 vs authors' beam=2 int8 — fair for drop-in use in our
 pipeline, not a reproduction of their best decode.
+
+## Addendum 2: four external models + turbo base evaluated — none beat stock large-v3
+
+Same 75-clip harness, greedy fp16, identical normalization. Turbo's stock
+processor used for oddadmix (repo tokenizer config malformed:
+extra_special_tokens list-vs-dict).
+
+| Model | Najdi | Hijazi | Khaliji | All | vs large-v3 |
+|---|---|---|---|---|---|
+| **Stock large-v3 (baseline)** | 29.4 | 44.2 | 53.7 | **43.3** | — |
+| Turbo zero-shot | 40.5 | 49.2 | 61.2 | 50.8 | +7.5 |
+| Bruno7 turbo-saudi-phase2 (LoRA) | 46.4 | 48.6 | 50.9 | 48.7 | +5.4 |
+| oddadmix turbo-dialectal (full FT) | 53.1 | 55.0 | 57.6 | 55.4 | +12.1 |
+| dev-ahmedhany arabic-ft (Addendum 1) | 48.5 | 56.0 | 64.2 | 56.8 | +13.4 |
+
+Findings:
+1. Turbo is a weaker base for Saudi (+7.5pp zero-shot) — none of the three
+   turbo-based candidates recovered the deficit. large-v3 base validated.
+2. oddadmix is worse than its own zero-shot base on our sample, despite its
+   card claiming large gains on its own test set — their Gulf/Saudi mix does
+   not match SADA's Saudi distribution. Fine-tuning on the wrong dialect mix
+   actively hurts the target dialect; per-dialect checkpoint selection on
+   held-out Saudi data is therefore mandatory in our training loop.
+3. Degenerate/loop rate is ~constant (14–15/75) across all models —
+   decoder-level failure mode, independent of fine-tune; the quality gate's
+   repetition_loop check stays load-bearing for any model choice.
+
+Saudi TTS catalog (for the future TTS milestone, unevaluated):
+NAMAA-Space/NAMAA-Saudi-TTS (Chatterbox config/prompting, MIT, unverified
+training), AhmedEladl/saudi-tts (XTTS lineage, Apache-2.0, no provenance
+disclosed, base-license inheritance to check), vadimbelsky/qwen3-TTS-KSA
+(Qwen3-TTS-12Hz full FT on ~13k KSA clips, Apache-2.0, single speaker, no
+metrics). All require listening tests before any adoption.
+
+Generalized harness: spikes/sada_model_eval.py (full or adapter, arbitrary
+repo, optional processor override).
