@@ -4,7 +4,7 @@
 
 **Goal:** Train a Saudi-dialect Whisper-large-v3 QLoRA on SADA (Saudi-filtered), export a merged model, and integrate it into Sawti as the `AsrMtProvider` fallback component plus an `--engine sawti-sa` mode.
 
-**Architecture:** Training lives in `sawti/training/` (never imported by runtime). Integration adds two injectable components (`asr_whisper_sa.py`, `mt_m4t.py`) behind existing Protocols; `fallback.py` and all frozen M0 files are untouched. Checkpoint selection on held-out Saudi dev WER + loop-rate (mandatory — wrong-dialect fine-tuning measurably hurts).
+**Architecture:** Training lives in `sawti/training/` (never imported by runtime). Integration adds two injectable components (`asr_whisper_sa.py`, `mt_m4t.py`) behind existing Protocols. AMENDED 2026-08-18 (re-review): the spec-gap repair milestone wires `FallbackHandler` into `Pipeline` FIRST (`pipeline.py` is un-frozen there per the approved architectural repair); SA targets the repaired orchestrator. Checkpoint selection on held-out Saudi dev — clean macro WER gated by n-gram loop-rate; all-valid macro AND corpus WER reported alongside (Addendum 4 metric set). Training includes required audio augmentation (Task 3).
 
 **Tech Stack:** transformers 4.57.x (pinned <5), peft, torch+cu126 (local overlay), datasets (streaming), jiwer, soundfile.
 
@@ -15,7 +15,7 @@
 
 ## Critical constraints (read first)
 
-1. **Frozen:** `sawti/types.py`, `sawti/config.py`, `sawti/pipeline.py` are never modified. Integration only adds files and edits `cli.py`.
+1. **Frozen (amended):** `sawti/types.py`, `sawti/config.py` are never modified. `pipeline.py` is modified by the spec-gap fallback repair which lands BEFORE this plan's integration tasks; SA itself adds no orchestrator changes. Integration adds files and edits `cli.py`.
 2. **Hermetic unit tests:** no model loads, downloads, CUDA, or network. Real-model tests carry `@pytest.mark.integration` (auto-skipped unless `SAWTI_RUN_INTEGRATION=1`).
 3. **GPU overlay stays unstaged:** the local cu126 block at the end of `pyproject.toml` must never be committed. Before any commit that stages `pyproject.toml`/`uv.lock`: strip the overlay, `uv lock`, stage, commit, re-append overlay locally (the established pattern from PR #2).
 4. **Branch/PR:** all work on `feat/sa-milestone` → PR → squash-merge. No direct pushes to `main` (protected).
@@ -109,6 +109,15 @@ def test_is_loop_detects_repetition():
     assert is_loop("short") is False
 
 
+def test_is_loop_detects_phrase_loops():
+    # The x3 phrase loop invisible to the legacy unigram/dominance rule
+    # (uniq 0.33, most 0.33) — Addendum 4's corrected failure mode.
+    assert is_loop("اشتركوا في القناه " * 3) is True
+    assert is_loop("و اشتركوا في القناه " * 8) is True
+    assert is_loop("very very important") is False
+    assert is_loop("مرحبا كيف حالك اليوم أتمنى أن تكون بخير") is False
+
+
 def test_wer_clean_basic():
     assert wer_clean("احمد ذهب", "احمد ذهب") == 0.0
     assert wer_clean("احمد", "احمد ذهب") == pytest.approx(0.5)
@@ -150,15 +159,31 @@ def norm(text: str) -> str:
     return " ".join(t.split())
 
 
-def is_loop(hyp: str) -> bool:
-    toks = hyp.split()
-    if len(toks) < 6:
-        return False
-    uniq = len(set(toks)) / len(toks)
-    from collections import Counter
+def _loop_run(toks, s: int, n: int) -> int:
+    run = 1
+    while s + n * (run + 1) <= len(toks) and toks[s:s + n] == toks[s + n * run: s + n * run + n]:
+        run += 1
+    return run
 
-    most = Counter(toks).most_common(1)[0][1] / len(toks)
-    return uniq < 0.25 or most > 0.6
+
+def is_loop(hyp: str, min_repeats: int = 3, max_n: int = 8) -> bool:
+    """N-gram repetition detector (Addendum 4): any 1..8-token span
+    repeating >=3 consecutive times, plus the legacy dominance signal."""
+    toks = hyp.split()
+    if len(toks) < min_repeats:
+        return False
+    for n in range(1, max_n + 1):
+        if n * min_repeats > len(toks):
+            break
+        for s in range(len(toks) - n * min_repeats + 1):
+            if toks[s:s + n] == toks[s + n:s + 2 * n] and _loop_run(toks, s, n) >= min_repeats:
+                return True
+    if len(toks) >= 6:
+        uniq = len(set(toks)) / len(toks)
+        most = Counter(toks).most_common(1)[0][1] / len(toks)
+        if uniq < 0.25 or most > 0.6:
+            return True
+    return False
 
 
 def wer_clean(ref: str, hyp: str) -> float:
@@ -218,7 +243,7 @@ def run_eval(asr_fn, data_dir: str | Path) -> list[dict]:
 
 import json  # noqa: E402  (kept low to mirror usage ordering)
 ```
-- [ ] **Step 4:** `uv run pytest tests/test_eval_utils.py -v` → 4 PASS. Full suite green.
+- [ ] **Step 4:** `uv run pytest tests/test_eval_utils.py -v` → 5 PASS (incl. phrase-loop regression). Full suite green.
 - [ ] **Step 5:** Commit: `feat(training): shared Saudi eval utils (norm/loop/aggregate)`.
 
 ---
@@ -392,7 +417,7 @@ if __name__ == "__main__":
 
 ---
 
-## Task 3: `sawti/training/dataset.py` — dataset + collator
+## Task 3: `sawti/training/dataset.py` — dataset + collator + augmentation (spec §2.6)
 
 **Files:** Create `sawti/training/dataset.py`; Test `tests/test_dataset.py`.
 
@@ -455,6 +480,18 @@ def test_collator_shapes_and_masking(tmp_path):
     assert batch["labels"].shape[0] == 2
     # bos stripped; padded positions are -100
     assert (batch["labels"] == -100).any()
+
+
+def test_augment_deterministic_and_bounded():
+    from sawti.training.dataset import augment
+
+    audio = np.ones(16000, np.float32) * 0.5
+    a1 = augment(audio, np.random.default_rng(7))
+    a2 = augment(audio, np.random.default_rng(7))
+    assert np.array_equal(a1, a2)  # deterministic per seed
+    assert a1.dtype == np.float32
+    assert float(np.std(a1)) > 1e-4  # noise actually added
+    assert len(a1) > 0
 ```
 - [ ] **Step 2:** FAIL, then **implement**:
 ```python
@@ -469,14 +506,37 @@ import soundfile as sf
 import torch
 
 
+def augment(audio: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Deterministic-seeded augmentation (spec §2.6): random gain, additive
+    gaussian noise at ~15-30 dB SNR, speed perturbation {0.9, 1.0, 1.1} via
+    linear resampling. The augmentation class plausibly behind oddadmix's
+    zero-loop robustness (Addendum 4). Music/reverb: deferred extension."""
+    out = audio.copy()
+    out *= float(rng.uniform(0.5, 1.0))
+    p_signal = float(np.mean(out ** 2)) + 1e-12
+    snr_db = float(rng.uniform(15.0, 30.0))
+    p_noise = p_signal / (10 ** (snr_db / 10))
+    out = out + rng.normal(0.0, p_noise ** 0.5, size=out.shape).astype(np.float32)
+    speed = float(rng.choice([0.9, 1.0, 1.1]))
+    if speed != 1.0:
+        n_out = max(1, int(len(out) / speed))
+        out = np.interp(
+            np.linspace(0.0, len(out) - 1, n_out),
+            np.arange(len(out)), out).astype(np.float32)
+    return out.astype(np.float32)
+
+
 class SadaDataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir: str | Path, max_text_len: int = 448) -> None:
+    def __init__(self, data_dir: str | Path, max_text_len: int = 448,
+                 augment_enabled: bool = False, seed: int = 0) -> None:
         self.dir = Path(data_dir)
         self.rows = [
             json.loads(line)
             for line in (self.dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
         ]
         self.max_text_len = max_text_len
+        self.augment_enabled = augment_enabled
+        self.rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -486,6 +546,8 @@ class SadaDataset(torch.utils.data.Dataset):
         audio, sr = sf.read(self.dir / f"{r['clip_id']}.wav", dtype="float32")
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
+        if self.augment_enabled:
+            audio = augment(audio, self.rng)
         text = (r.get("cleaned_text") or r.get("text") or "").strip()[: self.max_text_len]
         return {"audio": np.ascontiguousarray(audio, np.float32), "text": text}
 
@@ -514,7 +576,7 @@ class WhisperCollator:
         out["labels"] = labels
         return out
 ```
-- [ ] **Step 3:** `uv run pytest tests/test_dataset.py -v` → 2 PASS. Commit `feat(training): SadaDataset + Whisper collator`.
+- [ ] **Step 3:** `uv run pytest tests/test_dataset.py -v` → 3 PASS (incl. augmentation). Commit `feat(training): SadaDataset + collator + required augmentation`.
 
 ---
 
@@ -718,7 +780,7 @@ def main() -> None:
     model.print_trainable_parameters()
 
     processor = WhisperProcessor.from_pretrained(a.base)
-    train_ds = SadaDataset(a.train)
+    train_ds = SadaDataset(a.train, augment_enabled=True, seed=42)
     targs = build_training_args(a.out, flavor=a.flavor, max_steps=a.max_steps)
 
     def dev_eval_fn(m) -> dict:
@@ -1222,8 +1284,7 @@ Path("data/sada_training/test/final_eval.json").write_text(
 print(json.dumps(agg, indent=1, ensure_ascii=False))
 PY
   ```
-- [ ] **Step 3:** Write the success verdict into the research report addendum 3:
-  overall ≤ 20%? loop-rate < 5%? every dialect < its zero-shot (Najdi 29.4 / Hijazi 44.2 / Khaliji 53.7)? State PASS/FAIL per criterion — an honest FAIL is a valid milestone outcome and triggers iteration (more steps/data), not reframing.
+- [ ] **Step 3:** Write the success verdict into the research report (Addendum 5): clean macro WER ≤ 20%? n-gram loop-rate < 5%? every dialect < its zero-shot on paired clean macro (Najdi 29.4 / Hijazi 44.2 / Khaliji 53.7)? Also REPORT (not gate) all-valid macro AND corpus WER vs base (287.4% / 76.2%). State PASS/FAIL per criterion — an honest FAIL is a valid milestone outcome and triggers iteration (more steps/data), not reframing.
 - [ ] **Step 4:** Commit report + any fixes. Merge PR.
 
 ---

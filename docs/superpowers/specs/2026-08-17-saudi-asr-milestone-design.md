@@ -21,11 +21,14 @@ No language-ID routing is added anywhere (spec §1.4 rule 1 unchanged).
 
 ## 2. Training pipeline
 
-### 2.1 Base model — validated by measurement
+### 2.1 Base model — validated by paired measurement (Addendum 4)
 
-**Stock `openai/whisper-large-v3`.** Empirically the strongest available
-starting point for Saudi: 43.3% clean WER zero-shot vs turbo 50.8%, and four
-external fine-tunes all measured worse than stock large-v3 (Addendum 2).
+**Stock `openai/whisper-large-v3`.** On paired clean speech, no
+known-provenance candidate beats it (turbo +5.1, oddadmix +9.0,
+dev-ahmedhany +8.7). Bruno7 reaches parity (−0.6pp, n=57) but discloses no
+training data and cannot be built upon. Robustness views (all-valid corpus
+WER, n-gram loop-rate) are led by oddadmix (47.0% vs base 76.2%; 0% loops) —
+addressed via required augmentation (§2.6), not a base change.
 
 ### 2.2 Recipe — adopted from the strongest published config
 
@@ -57,9 +60,12 @@ actively hurts the target dialect (oddadmix worse than its own base);
 only per-dialect held-out measurement protects against this.
 
 - Dev set: the existing 75-clip Saudi sample (fast, per-dialect).
-- Every N checkpoints (N tunable, start 500): dev WER (overall + per
-  dialect) and loop-rate; log; keep best-on-dev.
-- Early stop if dev WER regresses for 3 consecutive evals.
+- Every N checkpoints (N tunable, start 500): dev clean macro WER,
+  all-valid macro WER, all-valid corpus WER, and n-gram loop-rate
+  (1–8-token spans, ≥3 repeats); log all four; keep best-on-dev.
+- Selection rule: gate on clean macro WER subject to a loop-rate
+  constraint (n-gram); macro and corpus are both reported.
+- Early stop if the selection metric regresses 3 consecutive evals.
 
 ### 2.5 Budget
 
@@ -69,10 +75,11 @@ may require batch/accum adjustment; the OOM fallback is batch 8 × accum 2.
 
 ## 3. Success criteria
 
-**Overall clean WER ≤ 20%** on the Saudi-filtered SADA test slice
-(≈ halving 43.3%), **loop-rate < 5%** of clips, **no dialect worse than
-zero-shot**. Measured on the full Saudi test slice at milestone end
-(the 75-clip sample remains the fast dev metric).
+**Clean macro WER ≤ 20%** on the Saudi-filtered SADA test slice, **n-gram
+loop-rate < 5%** of clips, **no dialect worse than zero-shot** on paired
+clean macro. All-valid macro AND corpus WER are reported (no single-view
+headlines); loop-rate uses the n-gram detector. Measured on the full Saudi
+test slice at milestone end (75-clip sample remains the fast dev metric).
 
 > This bar is the author's recommendation, not yet user-confirmed.
 > Missing it triggers iteration (more steps / more data), and will be
@@ -93,15 +100,20 @@ zero-shot**. Measured on the full Saudi test slice at milestone end
 
 ### 4.2 Wiring
 
-- `FallbackHandler` unchanged; at last receives a real `asr_mt` provider
-  (its graceful-degradation stub retires).
+- **Sequencing (approved 2026-08-18):** the spec-gap repair milestone wires
+  `FallbackHandler` into `Pipeline` (architectural repair per spec §5.3 —
+  `pipeline.py` is modified there, un-freezing it) BEFORE SA integration.
+  SA then targets the repaired orchestrator and fills `asr_mt` with the
+  real provider; the graceful-degradation stub retires here.
 - CLI: `--engine sawti-sa` → segmenter → `SaudiWhisperAsr` → `mt_m4t`
   → `BalancedQualityGate` → `RealPostProcessor`. Existing engines
   (`stub`, `m4t`) unchanged.
 
 ### 4.3 Contracts
 
-Frozen M0 contracts (`types.py`, `config.py`, `pipeline.py`) untouched.
+Frozen contracts: `types.py` and `config.py` untouched. `pipeline.py` is
+modified by the approved fallback repair (spec-gap milestone, lands first);
+SA adds no further orchestrator changes.
 All new components follow the Protocol + injectable-model pattern (unit
 tests hermetic; real-model tests `@pytest.mark.integration`, opt-in via
 `SAWTI_RUN_INTEGRATION=1`). All work via feature branch → PR →
@@ -134,6 +146,14 @@ stays local (uv-local pattern, unstaged cu126 block).
 - Artifacts: merged model + LoRA adapter on HuggingFace under
   CC BY-NC-SA-compatible terms (SADA-derived), model card stating data
   lineage; research report continuing the spike document.
+
+### 2.6 Audio augmentation (required)
+
+Training applies deterministic-seeded augmentation in the dataset: random
+gain, additive noise at controlled SNR, and speed perturbation — the
+augmentation class plausibly behind oddadmix's detector-robust zero-loop
+behavior (Addendum 4). Music/reverb-class augmentation is documented as a
+deferred extension of the same hook.
 
 ## 7. Risks and honest unknowns
 

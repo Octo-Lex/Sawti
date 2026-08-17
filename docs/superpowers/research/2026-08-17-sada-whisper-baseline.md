@@ -206,3 +206,48 @@ overall; 0–14.3% on short clips).
    decoding behavior.
 5. Gate n-gram repetition detection: still required before Whisper
    fallback (phrase loops observed in 3 of 5 models).
+
+## Addendum 4 (2026-08-18): CORRECTION v2 — n-gram loop detector; supersedes Addendum 3 numbers
+
+Addendum 3 fixed the pairing but kept the legacy loop detector (unigram
+dominance), which classifies the x3 phrase loop ("اشتركوا في القناه" ×3:
+uniq 0.33, most 0.33) as NOT a loop — the exact failure mode it claimed to
+exclude. Recomputed with the deterministic n-gram detector (1–8-token spans,
+≥3 consecutive repeats + legacy dominance; self-tested against the known
+examples). All numbers below supersede Addendum 3's.
+
+Base = stock large-v3. Paired common-clean; all-valid views; n-gram loops.
+
+| Model | Clean macro (Δ, n) | All-valid macro | All-valid corpus | Loop% |
+|---|---|---|---|---|
+| turbo zero-shot | 43.1→48.2 (+5.1, n=57) | 212.2 | 72.6 | 4.0 |
+| Bruno7 saudi-phase2 | 43.1→42.5 (**−0.6**, n=57) | 183.9 | 57.8 | 2.7 |
+| oddadmix dialectal | 44.1→53.1 (+9.0, n=58) | **59.7** | **47.0** | **0.0** |
+| dev-ahmedhany arabic-ft | 44.1→52.8 (+8.7, n=58) | 274.4 | 70.5 | 4.0 |
+| **base** | — | 287.4 | 76.2 | 4.0 |
+
+Metric definitions (named precisely): **macro** = mean per-clip WER
+(short-reference hallucinations dominate it — hence 287.4%); **corpus** =
+word errors weighted by reference length (base 76.2%).
+
+### Corrected conclusions (superseding Addendum 3 §"Design consequences")
+
+1. **SA training from stock large-v3 stands** — on provenance and clean
+   accuracy. Bruno7 reaches clean parity (−0.6pp) but discloses no training
+   data ("None dataset"); it cannot be responsibly built upon or cited as a
+   base. No candidate with known provenance beats the base on clean speech.
+2. **oddadmix's zero-loop behavior SURVIVES the n-gram detector** (0.0%
+   loops) and it leads every robustness view (corpus 47.0% vs base 76.2%).
+   The augmentation hypothesis is now detector-robust: audio augmentation
+   (noise/speed/reverb-class) is a required SA training component, and
+   oddadmix remains the robustness reference.
+3. **First-class metric set (final): clean macro WER, all-valid macro WER,
+   all-valid corpus WER, n-gram loop-rate.** Checkpoint selection gates on
+   clean macro subject to a loop-rate constraint; macro and corpus are both
+   reported so neither view can hide behind the other.
+4. Bruno7's quiet improvement (−0.6) is noted but within noise (n=57);
+   no action.
+
+Short-clip view (0.5–1.0s, n=14, floor now enforced): base macro 134.5%/0
+loops; oddadmix 78.6%/0 loops; dev-ahmedhany 1222.6%/14.3% loops —
+short-clip hallucination remains the product-risk differentiator.
