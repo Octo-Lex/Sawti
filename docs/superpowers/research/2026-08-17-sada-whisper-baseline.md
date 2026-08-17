@@ -152,3 +152,57 @@ metrics). All require listening tests before any adoption.
 
 Generalized harness: spikes/sada_model_eval.py (full or adapter, arbitrary
 repo, optional processor override).
+
+## Addendum 3 (2026-08-18): CORRECTION — paired methodology + two retractions
+
+**Methodology flaw fixed:** prior comparisons computed each model's clean
+subset independently (unpaired) — headline deltas averaged over different
+clips. All numbers below are PAIRED, recomputed from stored per-clip
+hypotheses (no ASR re-runs; `spikes/sada_paired_reanalysis.py`).
+
+### Paired results (base = stock large-v3 zero-shot)
+
+| Model | Paired clean WER (Δ, n) | All-valid WER (Δ, n) | Loop% | Short-clip mean WER |
+|---|---|---|---|---|
+| turbo zero-shot | 42.3→49.1 (+6.8, n=58) | 287.4→212.2 | 2.7 | 702 |
+| Bruno7 saudi-phase2 | 42.3→43.5 (**+1.2**, n=58) | 287.4→183.9 | 2.7 | 607 |
+| oddadmix dialectal | 43.3→53.9 (+10.6, n=59) | 287.4→**59.7** | **0.0** | 79 |
+| dev-ahmedhany arabic-ft | 43.3→53.6 (+10.3, n=59) | 287.4→274.4 | 2.7 | 1223 |
+| **base degeneracy** | — | 287.4 (n=75) | 2.7 | 134 |
+
+### Retraction 1 — repetition_loop check claim
+
+The claim that the spike "validates the BalancedQualityGate repetition_loop
+check as load-bearing" is RETRACTED. The check is unigram-only
+(`len(set(tokens)) == 1`); it misses the phrase-level loops
+("اشتركوا في القناه" ×3) that dominated observed failures. A deterministic
+n-gram repetition detector (1–8-token spans, ≥3 repeats) is required before
+any Whisper joins the fallback lane. (External review finding, verified.)
+
+### Retraction 2 — "none beat stock large-v3" is view-dependent
+
+On PAIRED CLEAN speech the conclusion holds (every candidate worse; Bruno7
+closer than previously reported, +1.2pp). On ALL-VALID-REFERENCE WER
+(hallucination cost included — the product-relevant view for Sawti's short
+chunks), stock large-v3 scores 287.4% while oddadmix scores 59.7% with ZERO
+loops: substantially more hallucination-robust than the base. The prior
+headline was an artifact of clean-only reporting.
+
+Also corrected: "degenerate rate ~constant across models" conflated
+degenerates (short-clip dominated, 19–21% everywhere) with loops (0–2.7%
+overall; 0–14.3% on short clips).
+
+### Design consequences (superseding prior addenda where they conflict)
+
+1. SA training decision unchanged for accuracy: stock large-v3 + SADA QLoRA.
+2. **Training must add audio augmentation** (noise/music/speed/reverb —
+   oddadmix's recipe) — the plausible cause of its zero-loop behavior.
+   Hallucination robustness is a training objective, not just a gate
+   concern.
+3. Metric set for checkpoint selection/final eval expands: clean WER,
+   **all-valid WER**, loop-rate (all first-class).
+4. oddadmix (Apache-2.0 full FT) is a robustness REFERENCE, not a base:
+   worse paired-clean accuracy (+10.6) but the benchmark for loop-free
+   decoding behavior.
+5. Gate n-gram repetition detection: still required before Whisper
+   fallback (phrase loops observed in 3 of 5 models).
