@@ -68,12 +68,3 @@ build-backend = "hatchling.build"
 # (Kept out of the committed config because uv 0.10 cannot express a
 # marker-conditional index fallback without a conflicting-index error, and a
 # hard-coded cu126 source would break resolution on macOS / CPU-only hosts.)
-
-[[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchaudio = { index = "pytorch-cu126" }
