@@ -92,3 +92,27 @@ preconditions resolved in the design:
 
 Raw artifacts: `data/sada_spike/` (gitignored): manifest.jsonl,
 eval_results.json, reanalysis.json, 75 wav clips.
+
+## Addendum (same day): existing Arabic adapter evaluated — rejected
+
+`dev-ahmedhany/whisper-large-v3-arabic-ft-v3-lora` (Apache-2.0, ~38h
+Egyptian/Levantine/Gulf/MSA, no Saudi data) evaluated on our 75-clip Saudi
+sample at its best-reported revision (`7923fe7bc9b7`), merged fp16, greedy
+decoding — same harness as the baseline:
+
+| Dialect | Zero-shot | Adapter | Δ |
+|---|---|---|---|
+| Najdi | 29.4% | 48.5% | +19.1pp |
+| Hijazi | 44.2% | 56.0% | +11.8pp |
+| Khaliji | 53.7% | 64.2% | +10.6pp |
+| **All** | **43.3%** | **56.8%** | **+13.4pp** |
+
+Worse across the board; regressions dominated by YouTube-style repetition
+hallucinations ("اشتركوا في القناه" loops) — consistent with its CV/MGB
+training mix. Decision: do NOT build on this adapter; train from stock
+large-v3 on SADA, but ADOPT its QLoRA recipe (r=8, α=16, q/v/k/out_proj+fc,
+paged_adamw_8bit, lr 1e-4, eff. batch 16) as starting hyperparameters. Loop
+rate joins WER as a first-class fine-tune metric.
+
+Caveat: greedy fp16 vs authors' beam=2 int8 — fair for drop-in use in our
+pipeline, not a reproduction of their best decode.
