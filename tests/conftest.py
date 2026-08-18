@@ -1,10 +1,14 @@
 """Shared pytest fixtures."""
 from __future__ import annotations
 
-# Load .env into os.environ FIRST, before any HF/transformers import tries to
-# resolve the HF cache path. The system env sets HF_HOME with literal quotes
-# that break pathlib; sawti.env loads the corrected unquoted path from .env.
-import sawti.env  # noqa: F401
+# Entry-edge environment loading (Commit 6 policy): the TEST RUNNER
+# explicitly applies file-over-OS override — this workstation's OS HF_HOME
+# is malformed (literal quotes) and the repo .env carries the corrected
+# cache path. sawti.env imports are side-effect free by design; only this
+# explicit call performs the correction.
+from sawti.env import load_env as _load_env
+
+_load_env(override=True)
 
 import numpy as np
 import pytest

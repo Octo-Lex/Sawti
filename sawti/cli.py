@@ -51,6 +51,9 @@ def transcribe(
     from sawti.env import load_env
 
     load_env()  # entry edge: fills absent vars only — OS environment wins
+    if engine not in ("stub", "m4t"):
+        raise typer.BadParameter(
+            f"unsupported engine {engine!r} — expected 'stub' or 'm4t'")
     configure_logging()
     config = load_config(config_path) if config_path.exists() else SawtiConfig()
     if engine == "m4t" and file is not None:
