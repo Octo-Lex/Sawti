@@ -23,12 +23,13 @@ from sawti.sources import StubAudioSource
 app = typer.Typer(add_completion=False, help="Sawti multilingual STT-translation.")
 
 
-def _stub_pipeline() -> Pipeline:
+def _stub_pipeline(on_decision=None) -> Pipeline:
     return Pipeline(
         segmenter=StubSegmenter(chunk_frames=2, sample_rate=16000),
         engine=EngineManager(engine=StubEngine("hello", 0.9)),
         gate=StubQualityGate(),
         postprocessor=StubPostProcessor(),
+        on_decision=on_decision,
     )
 
 
@@ -77,10 +78,17 @@ def eval(
     eval_set: Path = typer.Argument(..., help="Eval set directory"),
     target: str = typer.Option("eng", help="Target language: eng|ara|fra"),
 ) -> None:
-    """Run the evaluation harness."""
+    """Run the evaluation harness through a real (stub-component) pipeline."""
     from eval.harness import run_eval
+    from eval.transcribers import make_pipeline_transcriber
 
-    report = run_eval(eval_set, target_lang=target)
+    # Commit 5: the harness executes an injected pipeline — no stub
+    # hypotheses. Until Commit 6 binds the production builder, the CLI
+    # evaluates via the STUB pipeline: a real execution of stub components.
+    transcriber = make_pipeline_transcriber(
+        lambda on_decision=None: _stub_pipeline(on_decision=on_decision), target
+    )
+    report = run_eval(eval_set, target_lang=target, transcriber=transcriber)
     typer.echo(f"Wrote report: {report}")
 
 

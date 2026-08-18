@@ -35,12 +35,15 @@ class Pipeline:
         gate: QualityGate,
         postprocessor: PostProcessor,
         fallback=None,  # FallbackHandler-compatible (has .recover)
+        on_decision=None,  # observability: called with each chunk's FINAL
+                           # GateDecision (post-fallback, pre-postprocess)
     ) -> None:
         self.segmenter = segmenter
         self.engine = engine
         self.gate = gate
         self.postprocessor = postprocessor
         self.fallback = fallback
+        self.on_decision = on_decision
 
     def run(self, source: AudioSource, target_lang: str) -> Iterable[OutputSegment]:
         for chunk in self.segmenter.process(source.iter_frames()):
@@ -48,5 +51,7 @@ class Pipeline:
             gated = self.gate.evaluate(result, chunk, target_lang)
             if gated.needs_retry and self.fallback is not None:
                 gated = self.fallback.recover(chunk, gated, target_lang)
+            if self.on_decision is not None:
+                self.on_decision(gated)
             cleaned = list(self.postprocessor.process([gated], target_lang))
             yield from cleaned
