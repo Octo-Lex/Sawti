@@ -1,8 +1,19 @@
-"""Sequential-generator orchestrator (spec §5.3).
+"""Sequential-generator orchestrator (spec §5.3) — Commit 2 wiring.
 
-Lock rule: each chunk is processed fully through engine → gate → (retry) →
-post-processing before the next chunk is emitted. No concurrency, no
-reordering for MVP.
+Locked control flow per chunk:
+
+    engine.translate    # exactly one primary call — never retried here
+    gate.evaluate       # exactly one primary evaluation
+      PASS    -> postprocessor
+      FAIL    -> fallback.recover(chunk, primary_decision, target_lang)
+                 # exactly once; its returned decision — accepted OR
+                 # exhausted — flows to postprocessor unchanged
+
+FallbackHandler is the sole recovery authority: the Pipeline holds no
+retry/rechunk/escalation policy of its own. A Pipeline constructed without
+a fallback forwards the rejected primary decision as-is (flagged) rather
+than inventing recovery, and never re-invokes recover() on an exhausted
+decision (no loop). Sequential ordering is preserved by construction.
 """
 from __future__ import annotations
 
@@ -23,20 +34,19 @@ class Pipeline:
         engine: EngineManager,
         gate: QualityGate,
         postprocessor: PostProcessor,
+        fallback=None,  # FallbackHandler-compatible (has .recover)
     ) -> None:
         self.segmenter = segmenter
         self.engine = engine
         self.gate = gate
         self.postprocessor = postprocessor
+        self.fallback = fallback
 
     def run(self, source: AudioSource, target_lang: str) -> Iterable[OutputSegment]:
         for chunk in self.segmenter.process(source.iter_frames()):
             result = self.engine.translate(chunk, target_lang)
             gated = self.gate.evaluate(result, chunk, target_lang)
-            if gated.needs_retry:
-                # M0: re-translate via the same (stub) engine; M1 swaps in
-                # the real fallback handler (retry → rechunk → ASR+MT).
-                retried = self.engine.translate(chunk, target_lang)
-                gated = self.gate.evaluate(retried, chunk, target_lang)
+            if gated.needs_retry and self.fallback is not None:
+                gated = self.fallback.recover(chunk, gated, target_lang)
             cleaned = list(self.postprocessor.process([gated], target_lang))
             yield from cleaned
