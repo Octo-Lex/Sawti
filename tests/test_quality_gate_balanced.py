@@ -130,3 +130,15 @@ def test_needs_retry_invariant_only_hard_failures_and_confidence():
     assert d2.needs_retry is True
     assert d2.low_confidence is True
     assert not any(d2.checks.values())
+
+
+def test_script_mismatch_toggle_disables_soft_signal_too():
+    # A fully disabled check is off for BOTH modes: no hard failure AND
+    # no soft diagnostic in the decision log.
+    cfg = _QGC(checks=ChecksConfig(script_mismatch=False))
+    r = _result(text="مرحبا كيف حالك اليوم هنا", conf=0.9, target="eng")
+    assert run_checks(r, _chunk(), "eng", cfg)["script_mismatch"] is False
+    assert soft_script_mismatch(r, "eng", cfg) is False
+    d = BalancedQualityGate(config=cfg).evaluate(r, _chunk(), "eng")
+    assert d.log[0]["soft_script_mismatch"] is False
+    assert d.needs_retry is False

@@ -78,6 +78,8 @@ def soft_script_mismatch(
     configured strictness for that language is soft (observability flag —
     never a hard gate)."""
     cfg = config or QualityGateConfig()
+    if not cfg.checks.script_mismatch:
+        return False  # a fully disabled check is off for BOTH signal modes
     expected = _EXPECTED_SCRIPT.get(target_lang)
     if expected is None:
         return False
