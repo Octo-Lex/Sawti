@@ -27,8 +27,10 @@ class Rechunker(Protocol):
 
 
 class FixedSplitRechunker:
-    """Splits a chunk into contiguous sub-chunks, each <= max_sub_duration_s
-    on the declared timeline.
+    """Splits a chunk into contiguous sub-chunks, each APPROXIMATELY
+    bounded by max_sub_duration_s on the declared timeline (integer
+    sample boundaries on awkward lengths can exceed the bound by a tiny
+    rounding epsilon; the invariant tests tolerate this).
 
     Sub-chunk ids are ``{parent_id}.r{i}``; audio is sliced by samples
     (contiguous, no overlap — overlap is a segmenter concern, not a
@@ -37,6 +39,14 @@ class FixedSplitRechunker:
 
     def __init__(self, max_sub_duration_s: float = 3.0) -> None:
         self.max_sub_duration_s = max_sub_duration_s
+
+    def with_tighter(self, factor: float = 2.0) -> "FixedSplitRechunker":
+        """Returns a tighter rechunker (max_sub_duration_s / factor, floored
+        at 0.25s) for multi-round rechunk escalation. The FallbackHandler
+        calls this between rounds when more rounds remain."""
+        return FixedSplitRechunker(
+            max_sub_duration_s=max(0.25, self.max_sub_duration_s / factor)
+        )
 
     def rechunk(self, chunk: AudioChunk) -> list[AudioChunk]:
         total = len(chunk.audio)

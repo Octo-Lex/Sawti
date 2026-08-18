@@ -69,3 +69,11 @@ def test_zero_audio_returns_empty():
     p = AudioChunk(id="c0", audio=np.zeros(0, np.float32),
                    sample_rate=16000, start_time=0.0, end_time=1.0)
     assert FixedSplitRechunker(3.0).rechunk(p) == []
+
+
+def test_with_tighter_halves_and_floors():
+    r = FixedSplitRechunker(max_sub_duration_s=3.0)
+    assert r.with_tighter(2.0).max_sub_duration_s == pytest.approx(1.5)
+    assert r.with_tighter(2.0).with_tighter(2.0).max_sub_duration_s == pytest.approx(0.75)
+    floored = FixedSplitRechunker(max_sub_duration_s=0.3).with_tighter(10.0)
+    assert floored.max_sub_duration_s == 0.25  # floor

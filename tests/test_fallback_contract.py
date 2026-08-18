@@ -361,3 +361,116 @@ def test_fallback_to_asr_mt_false_exhausts_instead():
     assert provider.calls == []             # provider present but disabled
     assert out.fallback_path == "exhausted"
     assert out.low_confidence is True
+
+
+# --- Commit 3: retry/rechunk limits are load-bearing execution policy ---
+
+from sawti.config import RetriesConfig, QualityGateConfig as _QGC
+
+
+def test_max_s2tt_retries_controls_retry_count():
+    chunk = _chunk()
+    engine = RecordingEngine()
+    conservative = ConservativeFake(conf=0.2)          # retries always fail
+    gate = ScriptedGate([
+        {"accepted": False, "checks": {"low_confidence": True}},  # retry 1
+        {"accepted": False, "checks": {"low_confidence": True}},  # retry 2
+        {"accepted": False, "checks": {"empty_output": True}},    # r0
+        {"accepted": False, "checks": {"empty_output": True}},    # r1
+        {"accepted": True, "checks": {}},                         # asr_mt
+    ])
+    fb = _handler(gate, engine=engine, provider=FakeAsrMt(),
+                  rechunker=FakeRechunker(), conservative=conservative,
+                  config=_QGC(retries=RetriesConfig(max_s2tt_retries=2,
+                                                    max_rechunk_attempts=1)))
+    out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
+    assert conservative.calls == ["c0", "c0"]          # exactly two retries
+    assert out.fallback_path == "asr_mt"
+    retry_lines = [l for l in format_trace(out).splitlines()
+                   if l.strip().startswith("retry")]
+    assert len(retry_lines) == 2
+    entries = [e for e in out.log if isinstance(e, dict) and e.get("stage") == "retry"]
+    assert [e["attempt"] for e in entries] == [1, 2]
+
+
+def test_retry_once_false_beats_nonzero_max_count():
+    chunk = _chunk()
+    conservative = ConservativeFake()
+    gate = ScriptedGate([{"accepted": True, "checks": {}}])   # asr_mt
+    fb = _handler(gate, provider=FakeAsrMt(), conservative=conservative,
+                  config=_QGC(
+                      retry_once=False,
+                      retries=RetriesConfig(max_s2tt_retries=2,
+                                            max_rechunk_attempts=0)))
+    out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
+    assert conservative.calls == []                    # count overridden off
+    assert out.fallback_path == "asr_mt"
+
+
+class TightenableFake:
+    """2 sub-chunks in round 1, 4 after one with_tighter() call."""
+
+    def __init__(self) -> None:
+        self.rnd = 0
+        self.rechunk_calls = 0
+        self.tighten_calls = 0
+
+    def rechunk(self, chunk):
+        self.rechunk_calls += 1
+        k = 2 if self.rnd == 0 else 4
+        n = len(chunk.audio)
+        span = chunk.end_time - chunk.start_time
+        out = []
+        for i in range(k):
+            a, b = i * n // k, (i + 1) * n // k
+            out.append(AudioChunk(
+                id=f"{chunk.id}.r{i}", audio=chunk.audio[a:b].copy(),
+                sample_rate=16000,
+                start_time=chunk.start_time + (a / n) * span,
+                end_time=chunk.start_time + (b / n) * span))
+        return out
+
+    def with_tighter(self, factor):
+        self.tighten_calls += 1
+        self.rnd += 1
+        return self
+
+
+def test_max_rechunk_attempts_controls_rounds_and_tightens():
+    chunk = _chunk()
+    engine = RecordingEngine()
+    rechunker = TightenableFake()
+    gate = ScriptedGate([
+        {"accepted": False, "checks": {"low_confidence": True}},  # retry
+    ] + [{"accepted": False, "checks": {"empty_output": True}}] * 2   # round 1
+    + [{"accepted": False, "checks": {"empty_output": True}}] * 4     # round 2
+    + [{"accepted": True, "checks": {}}])                             # asr_mt
+    fb = _handler(gate, engine=engine, provider=FakeAsrMt(),
+                  rechunker=rechunker, conservative=ConservativeFake(),
+                  config=_QGC(retries=RetriesConfig(max_s2tt_retries=1,
+                                                    max_rechunk_attempts=2)))
+    out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
+
+    assert rechunker.rechunk_calls == 2
+    assert rechunker.tighten_calls == 1               # tightened between rounds
+    assert len(engine.calls) == 6                     # 2 + 4 sub translations
+    assert out.fallback_path == "asr_mt"
+    rounds = [e.get("round") for e in out.log
+              if isinstance(e, dict) and str(e.get("stage", "")).startswith("rechunk")]
+    assert rounds == [1, 1, 2, 2, 2, 2]               # structured round fields
+
+
+def test_max_rechunk_attempts_zero_skips_rechunk_stage():
+    chunk = _chunk()
+    rechunker = FakeRechunker()
+    gate = ScriptedGate([
+        {"accepted": False, "checks": {"low_confidence": True}},  # retry
+        {"accepted": True, "checks": {}},                         # asr_mt
+    ])
+    fb = _handler(gate, provider=FakeAsrMt(), rechunker=rechunker,
+                  conservative=ConservativeFake(),
+                  config=_QGC(retries=RetriesConfig(max_s2tt_retries=1,
+                                                    max_rechunk_attempts=0)))
+    out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
+    assert rechunker.calls == []                      # stage fully skipped
+    assert out.fallback_path == "asr_mt"

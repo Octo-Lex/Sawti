@@ -111,51 +111,71 @@ class FallbackHandler:
         trace: list[dict] = [self._entry("primary", chunk.id, primary)]
         best = primary
 
-        # Stage 2: conservative retry (explicit seam; identity mode when
-        # no seam is bound — ordinary engine.translate).
-        if cfg.retry_once:
+        # Stage 2: conservative retries (explicit seam; identity mode when
+        # no seam is bound — ordinary engine.translate). Count is
+        # config-owned execution policy: max_s2tt_retries when retry_once
+        # is set, else zero. Default (retry_once + max=1) = one retry.
+        retry_attempts = cfg.retries.max_s2tt_retries if cfg.retry_once else 0
+        if retry_attempts > 0:
             retry_translate = (
                 self.conservative if self.conservative is not None
                 else self.engine.translate
             )
-            retried = retry_translate(chunk, target_lang)
-            d = self._evaluate(retried, chunk, target_lang)
-            if not d.needs_retry:
-                d.fallback_path = "retry"
-                return self._finalize(d, trace + [self._entry("retry", chunk.id, d)], chunk.id)
-            trace.append(self._entry("retry", chunk.id, d))
-            best = _better(best, d)
+            for attempt in range(retry_attempts):
+                retried = retry_translate(chunk, target_lang)
+                d = self._evaluate(retried, chunk, target_lang)
+                entry = self._entry("retry", chunk.id, d)
+                entry["attempt"] = attempt + 1
+                if not d.needs_retry:
+                    d.fallback_path = "retry"
+                    return self._finalize(d, trace + [entry], chunk.id)
+                trace.append(entry)
+                best = _better(best, d)
 
-        # Stage 3: rechunk -> COMPOSE a parent-level candidate.
+        # Stage 3: rechunk -> COMPOSE a parent-level candidate. Rounds are
+        # config-owned execution policy (retries.max_rechunk_attempts):
+        # each round re-splits (tighter via the optional with_tighter seam
+        # between rounds) and must compose; round 0's stage labels match
+        # the single-round contract exactly.
         if self.rechunker is not None and cfg.rechunk_on_failure:
-            subs = self.rechunker.rechunk(chunk)
-            sub_decisions: list[GateDecision] = []
-            all_valid = True
-            for i, sub in enumerate(subs):
-                r = self.engine.translate(sub, target_lang)
-                ds = self._evaluate(r, sub, target_lang)
-                trace.append(self._entry(f"rechunk[{i}]", sub.id, ds))
-                if ds.needs_retry:
-                    all_valid = False
-                else:
-                    sub_decisions.append(ds)
-                # Partial sub-chunks never compete for `best`.
-            if all_valid and sub_decisions:
-                texts = [d.result.raw_text.strip() for d in sub_decisions]
-                composed = EngineResult(
-                    chunk_id=chunk.id,
-                    raw_text=" ".join(t for t in texts if t),
-                    confidence=min(d.result.confidence for d in sub_decisions),
-                    source_lang_guess=sub_decisions[0].result.source_lang_guess,
-                    timing_ms={"rechunk_subs": [d.chunk_id for d in sub_decisions]},
-                    target_lang=target_lang,
-                )
-                dc = self._evaluate(composed, chunk, target_lang)
-                if not dc.needs_retry:
-                    dc.fallback_path = "rechunk"
-                    return self._finalize(dc, trace + [self._entry("rechunk", chunk.id, dc)], chunk.id)
-                trace.append(self._entry("rechunk", chunk.id, dc))
-                best = _better(best, dc)  # parent-level candidate may compete
+            rounds = max(0, cfg.retries.max_rechunk_attempts)
+            rc = self.rechunker
+            for rnd in range(rounds):
+                subs = rc.rechunk(chunk)
+                sub_decisions: list[GateDecision] = []
+                all_valid = True
+                for i, sub in enumerate(subs):
+                    r = self.engine.translate(sub, target_lang)
+                    ds = self._evaluate(r, sub, target_lang)
+                    entry = self._entry(f"rechunk[{i}]", sub.id, ds)
+                    entry["round"] = rnd + 1
+                    trace.append(entry)
+                    if ds.needs_retry:
+                        all_valid = False
+                    else:
+                        sub_decisions.append(ds)
+                    # Partial sub-chunks never compete for `best`.
+                if all_valid and sub_decisions:
+                    texts = [d.result.raw_text.strip() for d in sub_decisions]
+                    composed = EngineResult(
+                        chunk_id=chunk.id,
+                        raw_text=" ".join(t for t in texts if t),
+                        confidence=min(d.result.confidence for d in sub_decisions),
+                        source_lang_guess=sub_decisions[0].result.source_lang_guess,
+                        timing_ms={"rechunk_subs": [d.chunk_id for d in sub_decisions]},
+                        target_lang=target_lang,
+                    )
+                    dc = self._evaluate(composed, chunk, target_lang)
+                    entry = self._entry("rechunk", chunk.id, dc)
+                    entry["round"] = rnd + 1
+                    if not dc.needs_retry:
+                        dc.fallback_path = "rechunk"
+                        return self._finalize(dc, trace + [entry], chunk.id)
+                    trace.append(entry)
+                    best = _better(best, dc)  # parent-level candidate may compete
+                # Tighten for the next round when the rechunker supports it.
+                if rnd + 1 < rounds and hasattr(rc, "with_tighter"):
+                    rc = rc.with_tighter(2)
 
         # Stage 4: ASR+MT on the ORIGINAL chunk.
         if self.asr_mt is not None and cfg.fallback_to_asr_mt:
