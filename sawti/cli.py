@@ -8,7 +8,6 @@ from pathlib import Path
 
 import typer
 
-import sawti.env  # noqa: F401  loads .env into os.environ before HF imports
 from sawti.config import SawtiConfig, load_config
 from sawti.engine import EngineManager, StubEngine
 from sawti.logging_setup import configure_logging
@@ -49,6 +48,9 @@ def transcribe(
     config_path: Path = typer.Option(Path("config/default.yaml"), help="Config YAML"),
 ) -> None:
     """Transcribe audio to the target language."""
+    from sawti.env import load_env
+
+    load_env()  # entry edge: fills absent vars only — OS environment wins
     configure_logging()
     config = load_config(config_path) if config_path.exists() else SawtiConfig()
     if engine == "m4t" and file is not None:
@@ -74,7 +76,10 @@ def eval(
     """Run the evaluation harness through a real pipeline."""
     from sawti.env import load_env
 
-    load_env(override=True)  # entry edge: .env may correct OS env (see env.py)
+    load_env()  # entry edge: fills absent vars only — OS environment wins
+    if engine not in ("stub", "real"):
+        raise typer.BadParameter(
+            f"unsupported engine {engine!r} — expected 'stub' or 'real'")
     from eval.harness import run_eval
     from eval.transcribers import make_pipeline_transcriber
 

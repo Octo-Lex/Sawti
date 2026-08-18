@@ -39,12 +39,16 @@ def _load_m4t(device: str):
     return engine
 
 
-def make_conservative_retry(engine):
-    """Bind the ConservativeRetry seam to the SAME loaded M4T engine with
-    conservative generation (beam search, deterministic)."""
+def make_conservative_retry(engine_mgr):
+    """Bind the ConservativeRetry seam to the EngineManager's CURRENT
+    engine instance (same loaded model, conservative generation: beam
+    search, deterministic). Resolved at CALL time so lazy/idle_unload
+    rebuilds are honored."""
 
     def conservative(chunk, target_lang):
-        return engine.translate(chunk, target_lang, conservative=True)
+        return engine_mgr.engine.translate(
+            chunk, target_lang, conservative=True
+        )
 
     return conservative
 
@@ -54,15 +58,25 @@ def build_real_pipeline(
     on_decision=None,
     *,
     device: str | None = None,
-    m4t_engine=None,           # injectable: SeamlessM4TEngine-compatible
+    m4t_engine=None,           # injectable: adopts a BUILT engine (resident only)
+    m4t_factory=None,          # injectable: engine factory (honors load_policy)
     provider="real",           # "real" | None | AsrMtProvider instance
     gate=None,
     postprocessor=None,
     segmenter=None,
     rechunker=None,
+    clock=None,                # injectable monotonic clock (idle_unload tests)
 ) -> Pipeline:
     cfg = config or SawtiConfig()
     dev = device or cfg.s2tt.device
+
+    # Config truthfulness: only the balanced gate policy exists in M1.
+    # Reject anything else loudly rather than silently ignoring the knob.
+    if cfg.quality_gate.policy != "balanced":
+        raise ValueError(
+            f"unsupported quality_gate.policy: {cfg.quality_gate.policy!r} "
+            f"(only 'balanced' is implemented in M1)"
+        )
 
     from sawti.engine_m4t import SeamlessM4TEngine  # noqa: F401 (type hint)
     from sawti.postprocess_real import RealPostProcessor
@@ -71,12 +85,25 @@ def build_real_pipeline(
     from sawti.segmenter_silero import RealSegmenter
     from sawti.vad import SileroVad
 
-    engine = m4t_engine if m4t_engine is not None else _load_m4t(dev)
-    # Resident construction (spec §3.3 default): the built engine is
-    # adopted directly. True lazy/idle_unload production would pass an
-    # engine_factory performing the load — the lifecycle is real either
-    # way (see tests/test_engine_manager.py).
-    engine_mgr = EngineManager(engine=engine, config=cfg.s2tt)
+    # Lifecycle is REAL on the production path: the default builder hands
+    # EngineManager an M4T factory, so load_policy controls model loading
+    # (resident=eager, lazy=first translate, idle_unload=release+rebuild).
+    # Adopting a prebuilt engine is constrained to resident semantics.
+    if m4t_engine is not None:
+        if cfg.s2tt.load_policy != "resident":
+            raise ValueError(
+                "m4t_engine injection adopts a BUILT engine — only valid "
+                "with load_policy='resident'; use m4t_factory for "
+                "lazy/idle_unload semantics"
+            )
+        engine_mgr = EngineManager(engine=m4t_engine, config=cfg.s2tt,
+                                   clock=clock)
+    else:
+        factory = m4t_factory if m4t_factory is not None else (
+            lambda: _load_m4t(dev)
+        )
+        engine_mgr = EngineManager(engine_factory=factory, config=cfg.s2tt,
+                                   clock=clock)
 
     # Provider policy: the config promises ASR+MT escalation or it doesn't.
     if cfg.quality_gate.fallback_to_asr_mt:
@@ -98,7 +125,7 @@ def build_real_pipeline(
         gate=None,  # evaluated per-call below; handler shares the gate
         asr_mt=provider,
         rechunker=rechunker if rechunker is not None else FixedSplitRechunker(),
-        conservative=make_conservative_retry(engine),
+        conservative=make_conservative_retry(engine_mgr),
         config=cfg.quality_gate,
     )
 

@@ -67,7 +67,9 @@ class WhisperM4TProvider:
         asr = self._ensure_asr()
         out = asr(audio, return_language=True)
         text = out["text"].strip()
-        detected = _WHISPER_TO_SAWTI.get((out.get("language") or "").lower())
+        raw_lang = (out.get("language") or "").lower()
+        detected = _WHISPER_TO_SAWTI.get(raw_lang)
+        unmapped = detected is None and bool(raw_lang)
         if detected is not None and detected != target_lang:
             processor, model = self._ensure_mt()
             src = _SAWTI_TO_M4T_SOURCE[detected]
@@ -78,12 +80,19 @@ class WhisperM4TProvider:
             ids = ids.tolist() if hasattr(ids, "tolist") else list(ids)
             text = processor.tokenizer.decode(
                 ids, skip_special_tokens=True).strip()
+        # UNMAPPED detected language (e.g. Whisper reports a language we
+        # do not support): the ASR transcript is preserved but the result
+        # is explicitly UNTRUSTED — confidence 0.0 and a marker in
+        # timing_ms — so the quality gate flags it rather than the text
+        # silently passing as target-language output.
         return EngineResult(
             chunk_id=chunk.id,
             raw_text=text,
-            confidence=0.8,  # heuristic; the gate's structural checks decide
-            source_lang_guess=detected,
+            confidence=0.0 if unmapped else 0.8,
+            source_lang_guess=detected if detected is not None else (
+                raw_lang or None),
             timing_ms={"asr_mt_ms": (time.perf_counter() - t0) * 1000.0,
-                       "path": "whisper+m4t"},
+                       "path": "whisper+m4t",
+                       "unmapped_language": raw_lang if unmapped else None},
             target_lang=target_lang,
         )

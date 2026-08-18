@@ -28,3 +28,10 @@ def test_transcribe_file_uses_real_pipeline(tmp_path):
         app, ["transcribe", str(wav), "--target", "eng", "--engine", "stub"]
     )
     assert result.exit_code == 0
+
+
+def test_eval_engine_typo_rejected():
+    result = runner.invoke(app, ["eval", "tests/fixtures", "--target", "eng",
+                                 "--engine", "rael"])
+    assert result.exit_code != 0
+    assert "unsupported engine" in result.output
