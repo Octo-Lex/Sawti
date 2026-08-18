@@ -1,5 +1,13 @@
 # SA — Saudi ASR Milestone Implementation Plan
 
+> **RECONCILED 2026-08-18 against the merged M1 baseline (PR #3):**
+> M1 is the immutable runtime baseline. SA does NOT modify Pipeline,
+> fallback ordering, segmentation, or the generic gate. Task 1 imports
+> the SHARED production loop detector (no dominance-heuristic fork).
+> Task 3 derives augmentation RNG per-sample (deterministic). Tasks 8-10
+> specialize the ASR component via the existing provider/builder
+> architecture instead of creating a parallel orchestration path.
+
 > **For agentic workers:** Execute this plan task-by-task with fresh subagents per task, two-stage review on Tasks 9–11. Steps use checkbox (`- [ ]`) syntax. Tasks marked **OPERATOR** are run by the human/controller directly (long GPU jobs or large downloads), not by implementation subagents.
 
 **Goal:** Train a Saudi-dialect Whisper-large-v3 QLoRA on SADA (Saudi-filtered), export a merged model, and integrate it into Sawti as the `AsrMtProvider` fallback component plus an `--engine sawti-sa` mode.
@@ -97,6 +105,7 @@ import pytest
 
 from sawti.training.eval_utils import (aggregate, annotate_degenerate,
                                     is_loop, norm, wer_clean)
+# is_loop is re-exported from sawti.loop_detect (shared production module)
 
 
 def test_norm_unifies_arabic_and_strips_punct():
@@ -104,24 +113,18 @@ def test_norm_unifies_arabic_and_strips_punct():
     assert norm("أحمد  إبراهيم") == "احمد ابراهيم"
 
 
-def test_is_loop_detects_repetition():
-    assert is_loop("لا " * 12) is True
-    assert is_loop("لا لا انتظر") is False
-    assert is_loop("short") is False
-
-
-def test_is_loop_detects_phrase_loops():
-    # The x3 phrase loop invisible to the legacy unigram/dominance rule
-    # (uniq 0.33, most 0.33) — Addendum 4's corrected failure mode.
+def test_shared_detector_pinned_through_eval_utils():
+    # The shared M1 detector, imported via eval_utils: phrase loops catch,
+    # frequency alone never gates (the dominance fork is gone).
     assert is_loop("اشتركوا في القناه " * 3) is True
-    assert is_loop("و اشتركوا في القناه " * 8) is True
-    assert is_loop("very very important") is False
-    assert is_loop("مرحبا كيف حالك اليوم أتمنى أن تكون بخير") is False
+    assert is_loop("لا " * 12) is True
+    assert is_loop("no no wait no no stop no no listen") is False
 
 
 def test_wer_clean_basic():
     assert wer_clean("احمد ذهب", "احمد ذهب") == 0.0
-    assert wer_clean("احمد", "احمد ذهب") == pytest.approx(0.5)
+    # 1 insertion over 1 reference word = WER 1.0 (jiwer convention).
+    assert wer_clean("احمد", "احمد ذهب") == pytest.approx(1.0)
 
 
 def test_annotate_degenerate_sets_metric_fields():
@@ -186,31 +189,11 @@ def norm(text: str) -> str:
     return " ".join(t.split())
 
 
-def _loop_run(toks, s: int, n: int) -> int:
-    run = 1
-    while s + n * (run + 1) <= len(toks) and toks[s:s + n] == toks[s + n * run: s + n * run + n]:
-        run += 1
-    return run
-
-
-def is_loop(hyp: str, min_repeats: int = 3, max_n: int = 8) -> bool:
-    """N-gram repetition detector (Addendum 4): any 1..8-token span
-    repeating >=3 consecutive times, plus the legacy dominance signal."""
-    toks = hyp.split()
-    if len(toks) < min_repeats:
-        return False
-    for n in range(1, max_n + 1):
-        if n * min_repeats > len(toks):
-            break
-        for s in range(len(toks) - n * min_repeats + 1):
-            if toks[s:s + n] == toks[s + n:s + 2 * n] and _loop_run(toks, s, n) >= min_repeats:
-                return True
-    if len(toks) >= 6:
-        uniq = len(set(toks)) / len(toks)
-        most = Counter(toks).most_common(1)[0][1] / len(toks)
-        if uniq < 0.25 or most > 0.6:
-            return True
-    return False
+# THE detector is the shared production implementation (M1 PR #3):
+# pure consecutive-block semantics — lexical frequency/dominance NEVER
+# gates. Importing it here guarantees training-time selection, the
+# evaluator, and the runtime gate agree by construction.
+from sawti.loop_detect import is_loop
 
 
 def wer_clean(ref: str, hyp: str) -> float:
@@ -485,18 +468,24 @@ import torch
 from sawti.training.dataset import SadaDataset, WhisperCollator
 
 
-class FakeProcessor:
-    class tokenizer:
-        bos_token_id = 1
+class FakeTokenizer:
+    """Callable (the collator invokes tok(...)), with bos_token_id."""
 
-        @staticmethod
-        def pad(texts, **kw):
-            ids = torch.tensor([[1, 5, 6], [1, 5, 0]])
-            am = torch.tensor([[1, 1, 1], [1, 1, 0]])
-            class B:
-                input_ids = ids
-                attention_mask = am
-            return B()
+    bos_token_id = 1
+
+    def __call__(self, texts, padding=True, truncation=True,
+                 max_length=448, return_tensors="pt"):
+        ids = torch.tensor([[1, 5, 6], [1, 5, 0]])
+        am = torch.tensor([[1, 1, 1], [1, 1, 0]])
+
+        class B:
+            input_ids = ids
+            attention_mask = am
+        return B()
+
+
+class FakeProcessor:
+    tokenizer = FakeTokenizer()
 
     def __call__(self, audio, sampling_rate=16000, return_tensors="pt"):
         class F:
@@ -534,16 +523,17 @@ def test_collator_shapes_and_masking(tmp_path):
     assert (batch["labels"] == -100).any()
 
 
-def test_augment_deterministic_and_bounded():
+def test_augment_deterministic_per_sample_and_epoch():
     from sawti.training.dataset import augment
 
     audio = np.ones(16000, np.float32) * 0.5
-    a1 = augment(audio, np.random.default_rng(7))
-    a2 = augment(audio, np.random.default_rng(7))
-    assert np.array_equal(a1, a2)  # deterministic per seed
+    a1 = augment(audio, np.random.default_rng([42, 0, 3]))
+    a2 = augment(audio, np.random.default_rng([42, 0, 3]))
+    a3 = augment(audio, np.random.default_rng([42, 1, 3]))  # next epoch
+    assert np.array_equal(a1, a2)      # same (seed, epoch, index)
+    assert not np.array_equal(a1, a3)  # epoch advances the stream
     assert a1.dtype == np.float32
-    assert float(np.std(a1)) > 1e-4  # noise actually added
-    assert len(a1) > 0
+    assert float(np.std(a1)) > 1e-4    # noise actually added
 ```
 - [ ] **Step 2:** FAIL, then **implement**:
 ```python
@@ -580,7 +570,8 @@ def augment(audio: np.ndarray, rng: np.random.Generator) -> np.ndarray:
 
 class SadaDataset(torch.utils.data.Dataset):
     def __init__(self, data_dir: str | Path, max_text_len: int = 448,
-                 augment_enabled: bool = False, seed: int = 0) -> None:
+                 augment_enabled: bool = False, seed: int = 0,
+                 epoch: int = 0) -> None:
         self.dir = Path(data_dir)
         self.rows = [
             json.loads(line)
@@ -588,7 +579,12 @@ class SadaDataset(torch.utils.data.Dataset):
         ]
         self.max_text_len = max_text_len
         self.augment_enabled = augment_enabled
-        self.rng = np.random.default_rng(seed)
+        self.seed = seed
+        self.epoch = epoch
+
+    def set_epoch(self, epoch: int) -> None:
+        """Advance the augmentation stream deterministically per epoch."""
+        self.epoch = epoch
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -599,7 +595,10 @@ class SadaDataset(torch.utils.data.Dataset):
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
         if self.augment_enabled:
-            audio = augment(audio, self.rng)
+            # Deterministic PER SAMPLE (and epoch): no shared mutable RNG,
+            # so dataloader worker ordering cannot change augmentation.
+            rng = np.random.default_rng([self.seed, self.epoch, i])
+            audio = augment(audio, rng)
         text = (r.get("cleaned_text") or r.get("text") or "").strip()[: self.max_text_len]
         return {"audio": np.ascontiguousarray(audio, np.float32), "text": text}
 
@@ -995,7 +994,13 @@ Not a subagent task (hours–days of GPU). Runbook:
 
 ---
 
-## Task 8: `sawti/mt_m4t.py` — T2TT wrapper
+## Task 8: `sawti/mt_m4t.py` — T2TT wrapper (RECONCILED: thin, reused)
+
+> M1 RECONCILIATION: `sawti/providers.py` already implements the
+> Whisper→M4T provider with correct ara→arb source-code mapping and
+> same-language verbatim semantics. Task 8's wrapper becomes a THIN
+> reusable MT callable used by Task 9's `SaudiWhisperAsr` for its
+> non-Arabic targets — the same mapping table, no parallel provider.
 
 **Files:** Create `sawti/mt_m4t.py`; Test `tests/test_mt_m4t.py`.
 
@@ -1154,11 +1159,42 @@ class SaudiWhisperAsr:
             source_lang_guess="ara", timing_ms=timing, target_lang=target_lang,
         )
 ```
-- [ ] **Step 3:** 3 PASS. **Two-stage review** (spec compliance + code quality) before commit. Commit `feat(sa): SaudiWhisperAsr AsrMtProvider (ara verbatim, mt otherwise)`.
+- [ ] **Step 3:** 3 PASS. **Two-stage review** (spec compliance + code quality) before commit.
+- [ ] **Step 3b — pinned mock return-contract (previously identified):**
+  `transcribe_fn(audio, sample_rate) -> tuple[str, float]` is the frozen
+  internal seam; test doubles MUST return exactly `(text, confidence)`
+  tuples (not EngineResult, not strings) — any deviation is a contract
+  failure caught by the type-shape assertions below:
+
+```python
+def test_transcribe_fn_contract_pinned():
+    """Injected doubles must match the frozen seam exactly."""
+    calls = []
+    def good_fn(audio, sr):
+        calls.append((type(audio).__name__, sr))
+        return ("نص", 0.9)          # tuple[str, float] — the contract
+    s = SaudiWhisperAsr(transcribe_fn=good_fn, mt=None)
+    r = s.asr_mt(_chunk(), "ara")
+    assert isinstance(r.raw_text, str) and isinstance(r.confidence, float)
+    assert calls == ["ndarray", 16000]
+```
+
+  Commit `feat(sa): SaudiWhisperAsr AsrMtProvider (ara verbatim, mt otherwise)`.
 
 ---
 
 ## Task 10: `sawti/build_sa.py` + CLI `--engine sawti-sa` — REVIEW CHECKPOINT
+
+> M1 RECONCILIATION: there is NO new orchestration. `build_sa` delegates
+> to `sawti.build.build_real_pipeline` (the ONE production graph), with
+> the ASR component specialized: the fallback provider becomes
+> `WhisperM4TProvider(whisper_model_id=<merged SA model>)`, and — per
+> the SA spec §4.2 — the explicit `--engine sawti-sa` mode makes the
+> Saudi provider-backed pipeline the primary path. The M4T S2TT primary
+> remains the default elsewhere. Builder arguments mirror
+> `build_real_pipeline`'s injectables for hermetic tests (no model
+> loads); the CLI gains the validated `sawti-sa` engine value alongside
+> `stub|m4t`.
 
 **Files:** Create `sawti/build_sa.py`; Modify `sawti/cli.py`; Tests `tests/test_build_sa.py` (+ extend `tests/test_cli.py`).
 
@@ -1171,13 +1207,20 @@ from sawti.pipeline import Pipeline
 
 
 def test_builder_accepts_injected_fakes():
+    """Hermetic: no model loads; the Saudi ASR engine is the injected
+    fake (identity-checked), and the M1 recovery stack is present."""
     fake_transcribe = lambda a, sr: ("نص", 0.9)
     fake_mt = MagicMock()
     pipe = build_sawti_sa_pipeline(
         transcribe_fn=fake_transcribe, mt=fake_mt,
         segmentation_cfg=None, gate_cfg=None, post_cfg=None)
     assert isinstance(pipe, Pipeline)
-    assert pipe.engine.engine.__self__.__class__.__name__ != "SeamlessM4TEngine"
+    assert pipe.fallback is not None            # M1 recovery stack present
+    assert pipe.fallback.asr_mt is not None     # provider wired
+    # The primary engine is the SA ASR (wrapped), proven behaviorally:
+    src = StubAudioSource(n_frames=2, samples_per_frame=16000)
+    out = list(pipe.run(src, target_lang="ara"))
+    assert [o.text for o in out] == ["نص"]
 ```
 - [ ] **Step 2:** FAIL, then **implement** `sawti/build_sa.py`:
 ```python
