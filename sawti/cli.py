@@ -8,7 +8,6 @@ from pathlib import Path
 
 import typer
 
-import sawti.env  # noqa: F401  loads .env into os.environ before HF imports
 from sawti.config import SawtiConfig, load_config
 from sawti.engine import EngineManager, StubEngine
 from sawti.logging_setup import configure_logging
@@ -23,32 +22,22 @@ from sawti.sources import StubAudioSource
 app = typer.Typer(add_completion=False, help="Sawti multilingual STT-translation.")
 
 
-def _stub_pipeline() -> Pipeline:
+def _stub_pipeline(on_decision=None) -> Pipeline:
     return Pipeline(
         segmenter=StubSegmenter(chunk_frames=2, sample_rate=16000),
         engine=EngineManager(engine=StubEngine("hello", 0.9)),
         gate=StubQualityGate(),
         postprocessor=StubPostProcessor(),
+        on_decision=on_decision,
     )
 
 
-def _real_pipeline(config: SawtiConfig) -> Pipeline:
-    from sawti.engine_m4t import SeamlessM4TEngine
-    from sawti.segmenter_silero import RealSegmenter
-    from sawti.vad import SileroVad
+def _real_pipeline(config: SawtiConfig, on_decision=None) -> Pipeline:
+    """The ONE production graph (sawti/build.py): full recovery stack with
+    conservative retry, rechunker, and the real ASR+MT provider."""
+    from sawti.build import build_real_pipeline
 
-    device = config.s2tt.device
-    from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToText
-    processor = AutoProcessor.from_pretrained("facebook/seamless-m4t-v2-large")
-    model = SeamlessM4Tv2ForSpeechToText.from_pretrained("facebook/seamless-m4t-v2-large")
-    # SeamlessM4TEngine moves the model to `device` itself.
-    engine = SeamlessM4TEngine(processor=processor, model=model, device=device)
-    return Pipeline(
-        segmenter=RealSegmenter(vad=SileroVad(), config=config.segmentation),
-        engine=EngineManager(engine=engine, config=config.s2tt),
-        gate=BalancedQualityGate(config=config.quality_gate),
-        postprocessor=RealPostProcessor(config=config.postprocess),
-    )
+    return build_real_pipeline(config, on_decision=on_decision)
 
 
 @app.command()
@@ -59,6 +48,12 @@ def transcribe(
     config_path: Path = typer.Option(Path("config/default.yaml"), help="Config YAML"),
 ) -> None:
     """Transcribe audio to the target language."""
+    from sawti.env import load_env
+
+    load_env()  # entry edge: fills absent vars only — OS environment wins
+    if engine not in ("stub", "m4t"):
+        raise typer.BadParameter(
+            f"unsupported engine {engine!r} — expected 'stub' or 'm4t'")
     configure_logging()
     config = load_config(config_path) if config_path.exists() else SawtiConfig()
     if engine == "m4t" and file is not None:
@@ -76,11 +71,32 @@ def transcribe(
 def eval(
     eval_set: Path = typer.Argument(..., help="Eval set directory"),
     target: str = typer.Option("eng", help="Target language: eng|ara|fra"),
+    engine: str = typer.Option(
+        "stub", help="stub: real execution of stub components (no models); "
+                     "real: the full production graph (loads M4T/Whisper)"),
+    config_path: Path = typer.Option(Path("config/default.yaml"), help="Config YAML"),
 ) -> None:
-    """Run the evaluation harness."""
-    from eval.harness import run_eval
+    """Run the evaluation harness through a real pipeline."""
+    from sawti.env import load_env
 
-    report = run_eval(eval_set, target_lang=target)
+    load_env()  # entry edge: fills absent vars only — OS environment wins
+    if engine not in ("stub", "real"):
+        raise typer.BadParameter(
+            f"unsupported engine {engine!r} — expected 'stub' or 'real'")
+    from eval.harness import run_eval
+    from eval.transcribers import make_pipeline_transcriber
+
+    if engine == "real":
+        config = load_config(config_path) if config_path.exists() else SawtiConfig()
+        factory = lambda on_decision=None: _real_pipeline(  # noqa: E731
+            config, on_decision=on_decision)
+    else:
+        # Explicit stub mode: a real execution of stub components — the
+        # same seam, no models. Not a stubbed hypothesis.
+        factory = lambda on_decision=None: _stub_pipeline(  # noqa: E731
+            on_decision=on_decision)
+    transcriber = make_pipeline_transcriber(factory, target)
+    report = run_eval(eval_set, target_lang=target, transcriber=transcriber)
     typer.echo(f"Wrote report: {report}")
 
 

@@ -65,8 +65,13 @@ class _CountingEngine:
 
 
 def test_pipeline_retry_actually_re_invokes_engine():
-    """The retry path must call translate() twice on a needs_retry chunk.
-    This test fails if the orchestrator's retry branch is deleted."""
+    """Commit-2 contract: the Pipeline performs exactly ONE primary
+    translate; recovery re-invocation belongs to FallbackHandler. With a
+    handler attached (identity conservative retry), total calls == 2; the
+    recovered text is emitted. Fails if either party duplicates the other's
+    role."""
+    from sawti.fallback import FallbackHandler
+
     src = StubAudioSource(n_frames=2, samples_per_frame=16000)  # 1 chunk
     engine = _CountingEngine()
     pipe = Pipeline(
@@ -74,9 +79,10 @@ def test_pipeline_retry_actually_re_invokes_engine():
         engine=EngineManager(engine=engine),
         gate=StubQualityGate(),
         postprocessor=StubPostProcessor(),
+        fallback=FallbackHandler(engine=engine),
     )
     out = list(pipe.run(src, target_lang="eng"))
-    assert engine.calls == 2          # original + retry
+    assert engine.calls == 2          # one Pipeline primary + one handler retry
     assert len(out) == 1
     assert out[0].text == "recovered"  # the retry result, not the original
     assert out[0].low_confidence is False

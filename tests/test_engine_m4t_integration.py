@@ -47,3 +47,45 @@ def test_real_seamless_m4t_translates_english():
     assert r.target_lang == "eng"
     # Print the result so the test log shows what the model actually produced.
     print(f"\n[integration] target=eng raw_text={r.raw_text!r} confidence={r.confidence:.3f}")
+
+
+@pytest.mark.integration
+def test_production_builder_on_real_speech():
+    """The full production graph (build.py — segmenter, M4T engine, gate,
+    FallbackHandler with conservative retry + rechunker + real ASR+MT
+    provider, postprocessor) runs end-to-end on the licensed real-speech
+    fixture and produces meaningful, non-canned output."""
+    import sawti.env
+
+    sawti.env.load_env(override=True)  # corrected HF cache path
+    from pathlib import Path as _P
+
+    from sawti.audio_io import FileSource
+    from sawti.build import build_real_pipeline
+    from sawti.config import load_config
+
+    from sawti.config import SawtiConfig, SegmentationConfig
+
+    # The fixture is a single 0.49s word; production defaults
+    # (min_chunk_duration_ms=600) would correctly drop it at EOF flush.
+    # Short-clip thresholds make the fixture evaluable end-to-end.
+    cfg = SawtiConfig(segmentation=SegmentationConfig(
+        min_chunk_duration_ms=0, min_speech_ms=100))
+    pipe = build_real_pipeline(cfg)
+    assert pipe.fallback is not None
+    assert pipe.fallback.asr_mt is not None          # real provider wired
+    assert pipe.fallback.conservative is not None    # conservative seam bound
+    assert pipe.fallback.rechunker is not None
+
+    src = FileSource("tests/fixtures/realspeech/hello.wav", frame_samples=16000)
+    out = list(pipe.run(src, target_lang="eng"))
+    assert out, "no segments emitted for real speech"
+    text = " ".join(s.text for s in out).strip()
+    assert text                                    # non-empty transcription
+    # Not a canned/stub value ("hello" = StubEngine's string; "[stub]"
+    # = the old harness literal). Note "Hello." is a GENUINE M4T output
+    # for this fixture — the correct transcription — so it must NOT be
+    # in this blacklist.
+    assert text not in ("hello", "[stub]", "hello world")
+    for s in out:
+        assert 0.0 <= s.start_time < s.end_time <= 1.0  # within clip duration

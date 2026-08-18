@@ -47,6 +47,7 @@ def test_segmenter_splits_on_long_pause():
         vad=FakeVad([(0.9, p) for p in probs]),
         config=SegmentationConfig(
             pause_threshold_ms=10, min_chunk_duration_ms=0, overlap_ms=0,
+            min_speech_ms=0,  # 160ms speech: test splitting, not blip policy
         ),
     )
     chunks = list(seg.process(iter(frames)))
@@ -148,6 +149,7 @@ def test_sparse_speech_in_big_frame_does_not_inflate_start_time():
         vad=vad,
         config=SegmentationConfig(
             pause_threshold_ms=10, min_chunk_duration_ms=0, overlap_ms=0,
+            min_speech_ms=0,  # single 32ms sub: test timing, not blip policy
         ),
     )
     chunks = list(seg.process(iter([frame])))
