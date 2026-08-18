@@ -856,7 +856,9 @@ def main() -> None:
 
     p = argparse.ArgumentParser()
     p.add_argument("--train", required=True)
-    p.add_argument("--dev", default="data/sada_spike")
+    p.add_argument("--dev", default="data/sada_training/val",
+                   help="checkpoint-selection dev set — MUST be the "
+                        "validation split, never test-derived data")
     p.add_argument("--out", required=True)
     p.add_argument("--flavor", default="qlora", choices=["qlora", "lora"])
     p.add_argument("--max-steps", type=int, default=10000)
@@ -883,7 +885,7 @@ def main() -> None:
     train_ds = SadaDataset(a.train, augment_enabled=True, seed=42)
     targs = build_training_args(a.out, flavor=a.flavor, max_steps=a.max_steps)
 
-    def dev_eval_fn(m) -> dict:
+    def dev_eval_fn(m) -> dict:   # dev = VALIDATION split (never test)
         from sawti.training.eval_utils import aggregate
 
         asr = pipeline("automatic-speech-recognition", model=m,
@@ -1363,54 +1365,59 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import sawti.env  # noqa: F401
+# (No env loading here: tests/conftest.py owns the test-runner edge.)
 
-MERGED = "models/sa_merged"
+SA_DIR = "models/sa_merged"
 
 
 @pytest.mark.integration
-def test_merged_model_on_dev_sample():
-    """End-to-end: merged SA model through the eval harness on 10 dev clips."""
+def test_merged_model_on_validation_dev():
+    """End-to-end: merged SA model through the eval harness on 10
+    VALIDATION-split clips (checkpoint-selection data — never test)."""
     from sawti.training.eval_utils import aggregate, run_eval
 
-    if not Path(MERGED).exists():
-        pytest.skip("run Task 7 export first")
+    if not Path("data/sada_training/val").exists():
+        pytest.skip("run Task 2 validation materialization first")
     import torch
-    from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline
+    from transformers import (WhisperForConditionalGeneration,
+                              WhisperProcessor, pipeline)
 
-    processor = WhisperProcessor.from_pretrained(MERGED)
-    model = WhisperForConditionalGeneration.from_pretrained(MERGED, dtype=torch.float16).to("cuda")
+    processor = WhisperProcessor.from_pretrained(SA_DIR)
+    model = WhisperForConditionalGeneration.from_pretrained(
+        SA_DIR, dtype=torch.float16).to("cuda")
     asr = pipeline("automatic-speech-recognition", model=model,
                    tokenizer=processor.tokenizer,
                    feature_extractor=processor.feature_extractor,
                    torch_dtype=torch.float16, device=0, chunk_length_s=30)
     rows = run_eval(lambda w: asr(w, generate_kwargs={
         "language": "arabic", "task": "transcribe"})["text"].strip(),
-        "data/sada_spike")
+        "data/sada_training/val")
     agg = aggregate(rows)
-    print(f"\n[integration] clean {agg['clean_macro_wer']:.1f}% | loop "
+    print(f"
+[integration] clean {agg['clean_macro_wer']:.1f}% | loop "
           f"{agg['loop_pct']:.0f}% | allvalid macro/corpus "
           f"{agg['all_valid_macro_wer']:.1f}/{agg['all_valid_corpus_wer']:.1f}%")
     assert agg["n"] > 0
 
 
 @pytest.mark.integration
-def test_sawti_sa_pipeline_on_sample_wav(tmp_path):
-    """--engine sawti-sa path: transcribe test01.wav to Arabic."""
-    if not Path(MERGED).exists() or not Path("sample/test01.wav").exists():
-        pytest.skip("needs merged model + sample")
-    from sawti.audio_io import FileSource
+def test_sa_fallback_lane_on_real_speech():
+    """The SA model as the M1 fallback provider on the licensed
+    real-speech fixture (fallback integration only — primary-mode is a
+    separately-reviewed extension)."""
+    if not Path(SA_DIR).exists() or not Path(
+            "tests/fixtures/realspeech/hello.wav").exists():
+        pytest.skip("needs merged SA model + fixture")
     from sawti.build_sa import build_sawti_sa_pipeline
+    from sawti.audio_io import FileSource
 
-    pipe = build_sawti_sa_pipeline(model_dir=MERGED)
-    src = FileSource("sample/test01.wav", frame_samples=16000)
-    out = list(pipe.run(src, target_lang="ara"))
+    pipe = build_sawti_sa_pipeline()
+    out = list(pipe.run(FileSource("tests/fixtures/realspeech/hello.wav",
+                                   frame_samples=16000), "eng"))
     assert out, "no segments emitted"
     assert all(isinstance(s.text, str) for s in out)
 ```
-- [ ] Verify default-skip: `uv run pytest` → integration SKIPPED, suite green. Commit `test(sa): opt-in integration tests for merged model + pipeline`.
-
----
+- [ ] Verify default-skip: `uv run pytest` → integration SKIPPED, suite green. Commit `test(sa): opt-in integration tests (validation dev + fallback lane)`.
 
 ## Task 12: Final eval — full Saudi test slice + report — OPERATOR
 
