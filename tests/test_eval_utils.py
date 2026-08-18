@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from sawti.loop_detect import is_loop
-from sawti.training.eval_utils import (aggregate, annotate_degenerate, norm,
-                                       run_eval, wer_clean)
+import sawti.loop_detect
+from sawti.training.eval_utils import (aggregate, annotate_degenerate, is_loop,
+                                       norm, run_eval, wer_clean)
 
 
 def test_norm_unifies_arabic_and_strips_punct():
@@ -22,11 +22,30 @@ def test_wer_clean_basic():
 
 
 def test_shared_detector_pinned_through_eval_utils():
-    # The shared M1 detector, imported via eval_utils: phrase loops catch,
-    # frequency alone never gates (the dominance fork is gone).
+    # PASSTHROUGH pin: eval_utils.is_loop IS the production function —
+    # identity, not merely equal behavior — and the detector semantics
+    # hold through it (phrase loops catch; frequency never gates).
+    assert is_loop is sawti.loop_detect.is_loop
     assert is_loop("اشتركوا في القناه " * 3) is True
     assert is_loop("لا " * 12) is True
     assert is_loop("no no wait no no stop no no listen") is False
+
+
+def test_invalid_reference_excluded_from_clean_aggregates():
+    """A normal-duration row whose reference normalizes to zero words
+    must be degenerate — never a NaN poisoning clean macro WER."""
+    rows = annotate_degenerate([
+        {"dialect": "Najdi", "duration_s": 5.0, "cleaned_text": "مرحبا",
+         "hyp": "مرحبا", "wer": 0.0},
+        {"dialect": "Najdi", "duration_s": 5.0, "cleaned_text": "!!! ...",
+         "hyp": "شيء ما", "wer": None},
+    ])
+    assert rows[1]["degenerate"] is True        # invalid ref -> degenerate
+    out = aggregate(rows)
+    import math
+    assert math.isfinite(out["clean_macro_wer"])
+    assert out["clean_macro_wer"] == 0.0        # only the valid row counts
+    assert math.isfinite(out["per_dialect"]["Najdi"]["clean_macro_wer"])
 
 
 def test_annotate_degenerate_sets_metric_fields():

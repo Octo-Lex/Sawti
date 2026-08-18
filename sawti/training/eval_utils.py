@@ -28,12 +28,16 @@ def norm(text: str) -> str:
     return " ".join(t.split())
 
 
-def wer_clean(ref: str, hyp: str) -> float:
+def wer_clean(ref: str, hyp: str) -> float | None:
+    """WER after normalization; None when the reference normalizes to
+    zero words (empty/invalid). None — never NaN — so aggregation and
+    checkpoint comparison can never be poisoned by a non-finite value
+    (matches the M1 evaluator convention)."""
     import jiwer
 
     n_ref, n_hyp = norm(ref), norm(hyp)
     if not n_ref:
-        return float("nan")
+        return None
     return jiwer.wer(n_ref, n_hyp)
 
 
@@ -50,12 +54,15 @@ def annotate_degenerate(rows: list[dict]) -> list[dict]:
     for r in rows:
         ref = (r.get("cleaned_text") or r.get("text") or "").strip()
         n_ref = norm(ref)
-        r["loop"] = is_loop(r.get("hyp", ""))
-        r["degenerate"] = (
-            r.get("duration_s", 99) < 1.0 or r["loop"] or r.get("wer") is None
-        )
         r["valid_ref"] = bool(n_ref)
         r["n_ref_words"] = len(n_ref.split())
+        r["loop"] = is_loop(r.get("hyp", ""))
+        r["degenerate"] = (
+            r.get("duration_s", 99) < 1.0
+            or r["loop"]
+            or r.get("wer") is None
+            or not r["valid_ref"]
+        )
     return rows
 
 

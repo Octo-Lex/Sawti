@@ -251,3 +251,18 @@ word errors weighted by reference length (base 76.2%).
 Short-clip view (0.5–1.0s, n=14, floor now enforced): base macro 134.5%/0
 loops; oddadmix 78.6%/0 loops; dev-ahmedhany 1222.6%/14.3% loops —
 short-clip hallucination remains the product-risk differentiator.
+
+## Addendum 5 (2026-08-18): historical metrics recomputed under the AUTHORITATIVE detector — unchanged
+
+SA preflight reconciliation switched the paired-reanalysis harness
+(spikes/sada_paired_reanalysis.py) from its local n-gram+dominance
+detector to the SHARED production detector (sawti.loop_detect.is_loop —
+pure consecutive-block semantics) and recomputed every stored
+hypothesis. Result: **all values are identical to Addendum 4** —
+paired clean macros (+5.1 / −0.6 / +9.0 / +8.7), loop rates (4.0 / 2.7
+/ 0.0 / 4.0), degeneracy membership, and both all-valid views. No
+stored hypothesis was a dominance-only catch, so removing the heuristic
+reclassified nothing. Training selection, the evaluator, the runtime
+gate, and these historical baselines now share one metric definition.
+(The harness retains its paired/common-clean methodology; only the
+detector import changed.)
