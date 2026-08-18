@@ -2,18 +2,16 @@
 
 Proves the full traversal with fakes:
 
-    primary -> conservative retry -> rechunk -> ASR+MT -> best-effort
+    primary -> conservative retry (explicit seam) -> rechunk (content-
+    preserving parent composition) -> ASR+MT -> best-effort
 
 every stage traversed in exactly that order, the final GateDecision's
-fallback_path naming the stage that won, and decision.log carrying a
-complete trace. Config flags must demonstrably change the trace.
+fallback_path naming the stage that won, decision.log carrying a complete
+trace, and config switches demonstrably changing that trace.
 """
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
-import pytest
 
 from sawti.config import QualityGateConfig
 from sawti.fallback import FallbackHandler, format_trace
@@ -35,7 +33,6 @@ class ScriptedGate:
     """Gate whose evaluate() pops scripted verdicts in call order."""
 
     def __init__(self, verdicts: list[dict]) -> None:
-        # verdict: {"accepted": bool, "checks": {...}, "low_conf": bool}
         self._verdicts = list(verdicts)
         self.calls: list[str] = []
 
@@ -53,12 +50,27 @@ class ScriptedGate:
 
 
 class RecordingEngine:
+    """Ordinary primary-style translation (used for rechunk sub-chunks)."""
+
     def __init__(self) -> None:
         self.calls: list[str] = []
 
     def translate(self, chunk, target_lang):
         self.calls.append(chunk.id)
         return _result(chunk.id, f"eng:{chunk.id}", 0.5)
+
+
+class ConservativeFake:
+    """The conservative-retry seam — must be invoked for the retry stage,
+    distinct from ordinary engine.translate."""
+
+    def __init__(self, conf: float = 0.4) -> None:
+        self.conf = conf
+        self.calls: list[str] = []
+
+    def __call__(self, chunk, target_lang):
+        self.calls.append(chunk.id)
+        return _result(chunk.id, f"conservative:{chunk.id}", self.conf)
 
 
 class FakeRechunker:
@@ -93,7 +105,6 @@ class FakeAsrMt:
 
 
 def _primary(chunk_id: str, checks: dict) -> GateDecision:
-    """A rejected primary decision, as the Pipeline will hand to recover()."""
     return GateDecision(
         chunk_id=chunk_id, accepted=False,
         result=_result(chunk_id, "eng:primary-loop", 0.3),
@@ -104,41 +115,43 @@ def _primary(chunk_id: str, checks: dict) -> GateDecision:
 
 
 FULL_SCRIPT = [
-    # retry verdict
     {"accepted": False, "checks": {"low_confidence": True}, "low_conf": True},
-    # rechunk[0] verdict
     {"accepted": False, "checks": {"empty_output": True}},
-    # rechunk[1] verdict
     {"accepted": False, "checks": {"low_confidence": True}, "low_conf": True},
-    # asr_mt verdict
     {"accepted": True, "checks": {}},
 ]
 
 
+def _handler(gate, *, engine=None, provider=None, rechunker=None,
+             conservative=None, config=None) -> FallbackHandler:
+    return FallbackHandler(engine=engine or RecordingEngine(), gate=gate,
+                           asr_mt=provider, rechunker=rechunker,
+                           conservative=conservative, config=config)
+
+
 def test_full_escalation_path_order_and_trace():
     chunk = _chunk()
-    engine, gate, rechunker, provider = RecordingEngine(), ScriptedGate(FULL_SCRIPT), FakeRechunker(), FakeAsrMt()
-    fb = FallbackHandler(engine=engine, gate=gate, asr_mt=provider,
-                         rechunker=rechunker)
+    engine = RecordingEngine()
+    conservative = ConservativeFake()
+    gate = ScriptedGate(FULL_SCRIPT)
+    rechunker, provider = FakeRechunker(), FakeAsrMt()
+    fb = _handler(gate, engine=engine, provider=provider, rechunker=rechunker,
+                  conservative=conservative)
     out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
 
-    # Final decision: accepted via the ASR+MT stage.
     assert out.accepted is True
     assert out.fallback_path == "asr_mt"
     assert out.result.raw_text == "asr_mt:recovered"
     assert out.low_confidence is False
 
-    # Engine called for retry + both rechunk sub-chunks (NOT primary — the
-    # Pipeline owns the primary attempt) in exactly this order.
-    assert engine.calls == ["c0", "c0.r0", "c0.r1"]
-    # Gate evaluated those same three plus the provider's result.
+    # Retry went through the CONSERVATIVE seam (not ordinary translation);
+    # ordinary translation served only the rechunk sub-chunks, in order.
+    assert conservative.calls == ["c0"]
+    assert engine.calls == ["c0.r0", "c0.r1"]
     assert gate.calls == ["c0", "c0.r0", "c0.r1", "c0"]
-    # Provider saw the ORIGINAL chunk.
-    assert provider.calls == ["c0"]
-    # Rechunker invoked once, on the original chunk.
+    assert provider.calls == ["c0"]           # original chunk
     assert rechunker.calls == ["c0"]
 
-    # The human-readable trace matches the locked control flow.
     trace = format_trace(out)
     assert trace.splitlines() == [
         "chunk c0",
@@ -148,54 +161,133 @@ def test_full_escalation_path_order_and_trace():
         "  rechunk[1]    -> rejected: low_confidence",
         "  asr_mt        -> accepted",
     ]
-    # decision.log carries the same traversal as structured entries.
     stages = [e["stage"] for e in out.log if isinstance(e, dict) and "stage" in e]
     assert stages == ["primary", "retry", "rechunk[0]", "rechunk[1]", "asr_mt"]
 
 
 def test_retry_recovery_short_circuits_before_rechunk():
     chunk = _chunk()
-    engine, gate, rechunker, provider = RecordingEngine(), ScriptedGate(
-        [{"accepted": True, "checks": {}}]), FakeRechunker(), FakeAsrMt()
-    fb = FallbackHandler(engine=engine, gate=gate, asr_mt=provider,
-                         rechunker=rechunker)
+    engine = RecordingEngine()
+    conservative = ConservativeFake(conf=0.9)
+    gate = ScriptedGate([{"accepted": True, "checks": {}}])
+    rechunker, provider = FakeRechunker(), FakeAsrMt()
+    fb = _handler(gate, engine=engine, provider=provider, rechunker=rechunker,
+                  conservative=conservative)
     out = fb.recover(chunk, _primary("c0", {"low_confidence": True}), "eng")
     assert out.accepted is True
     assert out.fallback_path == "retry"
-    assert engine.calls == ["c0"]           # retry only
-    assert rechunker.calls == []            # never reached
-    assert provider.calls == []             # never reached
+    assert out.result.raw_text == "conservative:c0"  # the seam produced it
+    assert conservative.calls == ["c0"]
+    assert engine.calls == []
+    assert rechunker.calls == []
+    assert provider.calls == []
 
 
-def test_rechunk_acceptance_beats_escalation():
+class ScriptedSubtextEngine:
+    """Returns scripted text/conf per sub-chunk id suffix."""
+
+    def __init__(self, script: dict[str, tuple[str, float]]) -> None:
+        self.script = script
+        self.calls: list[str] = []
+
+    def translate(self, chunk, target_lang):
+        self.calls.append(chunk.id)
+        text, conf = self.script[chunk.id.rsplit(".", 1)[-1]]
+        return _result(chunk.id, text, conf)
+
+
+def test_successful_rechunk_composes_parent_result():
+    """The required regression:
+
+    parent: "A B C D"; r0 -> "A B" accepted; r1 -> "C D" accepted;
+    final: chunk_id == parent, text == "A B C D", path == "rechunk"."""
     chunk = _chunk()
-    engine = RecordingEngine()
+    engine = ScriptedSubtextEngine({"r0": ("A B", 0.8), "r1": ("C D", 0.7)})
     gate = ScriptedGate([
-        {"accepted": False, "checks": {"low_confidence": True}},   # retry
-        {"accepted": False, "checks": {"empty_output": True}},     # rechunk[0]
-        {"accepted": True, "checks": {}},                          # rechunk[1]
+        {"accepted": False, "checks": {"low_confidence": True}},  # retry
+        {"accepted": True, "checks": {}},                         # r0
+        {"accepted": True, "checks": {}},                         # r1
+        {"accepted": True, "checks": {}},                         # composed
     ])
-    rechunker, provider = FakeRechunker(), FakeAsrMt()
-    fb = FallbackHandler(engine=engine, gate=gate, asr_mt=provider,
-                         rechunker=rechunker)
+    conservative, provider = ConservativeFake(), FakeAsrMt()
+    fb = _handler(gate, engine=engine, provider=provider,
+                  rechunker=FakeRechunker(), conservative=conservative)
     out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
+
     assert out.accepted is True
     assert out.fallback_path == "rechunk"
-    assert out.chunk_id == "c0.r1"          # the accepted sub-chunk won
-    assert provider.calls == []             # escalation never reached
+    assert out.chunk_id == "c0"                    # parent-level result
+    assert out.result.raw_text == "A B C D"        # temporal composition
+    assert out.result.confidence == 0.7            # conservative min()
+    assert provider.calls == []                    # escalation never reached
+    trace = format_trace(out)
+    assert "  rechunk[0]    -> accepted" in trace
+    assert "  rechunk[1]    -> accepted" in trace
+    assert "  rechunk       -> accepted" in trace
+
+
+def test_partial_subchunk_never_terminal_and_composition_blocked():
+    """r0 accepted, r1 rejected: no composition, escalation continues, and
+    exhaustion can never emit the half-utterance r0 result."""
+    chunk = _chunk()
+    engine = ScriptedSubtextEngine({"r0": ("A B", 0.8), "r1": ("C D", 0.2)})
+    gate = ScriptedGate([
+        {"accepted": False, "checks": {"low_confidence": True}},  # retry
+        {"accepted": True, "checks": {}},                         # r0
+        {"accepted": False, "checks": {"empty_output": True}},    # r1
+        {"accepted": True, "checks": {}},                         # asr_mt
+    ])
+    fb = _handler(gate, engine=engine, provider=FakeAsrMt(),
+                  rechunker=FakeRechunker(), conservative=ConservativeFake())
+    out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
+    assert out.fallback_path == "asr_mt"
+    assert out.chunk_id == "c0"
+
+    # And with no provider, exhaustion emits a parent-level candidate —
+    # never the accepted-but-partial r0.
+    gate2 = ScriptedGate([
+        {"accepted": False, "checks": {"low_confidence": True}},
+        {"accepted": True, "checks": {}},
+        {"accepted": False, "checks": {"empty_output": True}},
+    ])
+    fb2 = _handler(gate2, engine=ScriptedSubtextEngine(
+        {"r0": ("A B", 0.8), "r1": ("C D", 0.2)}),
+        rechunker=FakeRechunker(), conservative=ConservativeFake())
+    out2 = fb2.recover(_chunk(), _primary("c0", {"repetition_loop": True}), "eng")
+    assert out2.fallback_path == "exhausted"
+    assert out2.chunk_id == "c0"
+    assert out2.result.raw_text != "A B"   # no half-utterance terminal output
+
+
+def test_composed_rejected_escalates():
+    """All subs valid but the composed parent fails the gate -> asr_mt."""
+    chunk = _chunk()
+    engine = ScriptedSubtextEngine({"r0": ("A B", 0.8), "r1": ("C D", 0.7)})
+    gate = ScriptedGate([
+        {"accepted": False, "checks": {"low_confidence": True}},   # retry
+        {"accepted": True, "checks": {}},                          # r0
+        {"accepted": True, "checks": {}},                          # r1
+        {"accepted": False, "checks": {"length_ratio_anomaly": True}},  # composed
+        {"accepted": True, "checks": {}},                          # asr_mt
+    ])
+    fb = _handler(gate, engine=engine, provider=FakeAsrMt(),
+                  rechunker=FakeRechunker(), conservative=ConservativeFake())
+    out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
+    assert out.fallback_path == "asr_mt"
+    trace = format_trace(out)
+    assert "  rechunk       -> rejected: length_ratio_anomaly" in trace
 
 
 def test_exhausted_path_returns_flagged_best_effort():
     chunk = _chunk()
-    engine = RecordingEngine()
     gate = ScriptedGate([
         {"accepted": False, "checks": {"low_confidence": True}, "low_conf": True},
         {"accepted": False, "checks": {"empty_output": True}},
         {"accepted": False, "checks": {"empty_output": True}},
         {"accepted": False, "checks": {"repetition_loop": True}},
     ])
-    fb = FallbackHandler(engine=engine, gate=gate, asr_mt=FakeAsrMt(),
-                         rechunker=FakeRechunker())
+    fb = _handler(gate, provider=FakeAsrMt(), rechunker=FakeRechunker(),
+                  conservative=ConservativeFake())
     out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
     assert out.accepted is False
     assert out.fallback_path == "exhausted"
@@ -209,35 +301,34 @@ def test_exhausted_path_returns_flagged_best_effort():
 
 def test_retry_once_false_removes_retry_stage():
     chunk = _chunk()
-    engine = RecordingEngine()
+    engine = ScriptedSubtextEngine({"r0": ("A B", 0.8), "r1": ("C D", 0.7)})
     gate = ScriptedGate([
-        {"accepted": True, "checks": {}},    # rechunk[0]
-        {"accepted": True, "checks": {}},    # rechunk[1] (all subs evaluated)
+        {"accepted": True, "checks": {}},    # r0
+        {"accepted": True, "checks": {}},    # r1
+        {"accepted": True, "checks": {}},    # composed
     ])
-    rechunker, provider = FakeRechunker(), FakeAsrMt()
-    fb = FallbackHandler(engine=engine, gate=gate, asr_mt=provider,
-                         rechunker=rechunker,
-                         config=QualityGateConfig(retry_once=False))
+    conservative = ConservativeFake()
+    fb = _handler(gate, engine=engine, provider=FakeAsrMt(),
+                  rechunker=FakeRechunker(), conservative=conservative,
+                  config=QualityGateConfig(retry_once=False))
     out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
-    # No retry on the full chunk; both sub-chunks were tried and evaluated.
-    assert engine.calls == ["c0.r0", "c0.r1"]
-    assert gate.calls == ["c0.r0", "c0.r1"]
+    assert conservative.calls == []           # retry stage fully removed
     assert out.fallback_path == "rechunk"
+    assert out.chunk_id == "c0"
     stages = [e["stage"] for e in out.log if isinstance(e, dict) and "stage" in e]
-    assert stages == ["primary", "rechunk[0]", "rechunk[1]"]
+    assert stages == ["primary", "rechunk[0]", "rechunk[1]", "rechunk"]
 
 
 def test_rechunk_on_failure_false_removes_rechunk_stage():
     chunk = _chunk()
-    engine = RecordingEngine()
     gate = ScriptedGate([
-        {"accepted": False, "checks": {"low_confidence": True}},
-        {"accepted": True, "checks": {}},    # asr_mt accepts
+        {"accepted": False, "checks": {"low_confidence": True}},  # retry
+        {"accepted": True, "checks": {}},                         # asr_mt
     ])
-    rechunker, provider = FakeRechunker(), FakeAsrMt()
-    fb = FallbackHandler(engine=engine, gate=gate, asr_mt=provider,
-                         rechunker=rechunker,
-                         config=QualityGateConfig(rechunk_on_failure=False))
+    rechunker, conservative = FakeRechunker(), ConservativeFake()
+    fb = _handler(gate, provider=FakeAsrMt(), rechunker=rechunker,
+                  conservative=conservative,
+                  config=QualityGateConfig(rechunk_on_failure=False))
     out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
     assert rechunker.calls == []
     assert out.fallback_path == "asr_mt"
@@ -247,12 +338,11 @@ def test_rechunk_on_failure_false_removes_rechunk_stage():
 
 def test_no_rechunker_configured_skips_rechunk_stage():
     chunk = _chunk()
-    engine = RecordingEngine()
     gate = ScriptedGate([
         {"accepted": False, "checks": {"low_confidence": True}},
         {"accepted": True, "checks": {}},
     ])
-    fb = FallbackHandler(engine=engine, gate=gate, asr_mt=FakeAsrMt())
+    fb = _handler(gate, provider=FakeAsrMt(), conservative=ConservativeFake())
     out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
     assert out.fallback_path == "asr_mt"
     stages = [e["stage"] for e in out.log if isinstance(e, dict) and "stage" in e]
@@ -261,13 +351,12 @@ def test_no_rechunker_configured_skips_rechunk_stage():
 
 def test_fallback_to_asr_mt_false_exhausts_instead():
     chunk = _chunk()
-    engine = RecordingEngine()
     gate = ScriptedGate([
         {"accepted": False, "checks": {"low_confidence": True}},
     ])
     provider = FakeAsrMt()
-    fb = FallbackHandler(engine=engine, gate=gate, asr_mt=provider,
-                         config=QualityGateConfig(fallback_to_asr_mt=False))
+    fb = _handler(gate, provider=provider, conservative=ConservativeFake(),
+                  config=QualityGateConfig(fallback_to_asr_mt=False))
     out = fb.recover(chunk, _primary("c0", {"repetition_loop": True}), "eng")
     assert provider.calls == []             # provider present but disabled
     assert out.fallback_path == "exhausted"

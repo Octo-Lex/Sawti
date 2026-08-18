@@ -2,24 +2,32 @@
 
 Locked M1 control flow, executed in exactly this order:
 
-    primary (evaluated by the Pipeline) -> conservative retry (same engine)
-      -> rechunk (tighter sub-chunks; each engine+gate evaluated; best
-         accepted sub-chunk wins)
-        -> ASR+MT provider (on the ORIGINAL chunk — the provider gets the
-           fullest audio context)
-          -> best-effort flagged output
+    primary (evaluated by the Pipeline) -> conservative retry -> rechunk
+      -> ASR+MT provider (on the ORIGINAL chunk) -> best-effort flagged output
 
 Contract notes:
 - ``recover(chunk, primary, target_lang)`` receives the already-evaluated
   PRIMARY GateDecision (the Pipeline owns the primary attempt) and returns
   the final GateDecision.
+- **Conservative retry is an explicit seam** (``ConservativeRetry``). When
+  none is provided the retry stage falls back to ordinary
+  ``engine.translate`` (identity "conservative" mode); binding the seam to
+  real conservative generation parameters is a later implementation step.
+- **Rechunk is content-preserving.** All sub-chunks are translated in
+  temporal order; their texts are concatenated into an EngineResult for
+  the PARENT chunk id with conservative aggregate confidence
+  ``min(sub.confidence)``; that composed result is gated against the
+  original parent chunk. ``fallback_path="rechunk"`` requires EVERY
+  sub-result to be valid AND the composed parent result to pass. Partial
+  sub-chunk results never compete for the terminal best-effort candidate —
+  exhaustion must not emit half an utterance.
 - Every stage appends a structured entry to ``decision.log`` with a
   ``stage`` key; ``fallback_path`` names the stage that produced the
   accepted (or best-effort) result; ``format_trace`` renders the
   human-readable traversal.
 - Config switches gate each stage: ``retry_once``, ``rechunk_on_failure``
   (also requires a rechunker), ``fallback_to_asr_mt``. An unavailable or
-  disabled stage is skipped and noted in the trace, never silently retried.
+  disabled stage is skipped, never silently retried.
 """
 from __future__ import annotations
 
@@ -34,14 +42,15 @@ class AsrMtProvider(Protocol):
     def asr_mt(self, chunk: AudioChunk, target_lang: str) -> EngineResult: ...
 
 
-def _reason(decision: GateDecision) -> str:
-    """First failed check name, else 'low_confidence' if flagged, else ''."""
-    for k, v in (decision.checks or {}).items():
-        if v:
-            return k
-    if decision.low_confidence:
-        return "low_confidence"
-    return ""
+class ConservativeRetry(Protocol):
+    """Explicit seam for conservative decoding on the retry stage.
+
+    A later step binds this to the M4T engine with conservative generation
+    parameters (beam/temperature/length-penalty); the handler only knows
+    the callable.
+    """
+
+    def __call__(self, chunk: AudioChunk, target_lang: str) -> EngineResult: ...
 
 
 def _better(a: GateDecision, b: GateDecision) -> GateDecision:
@@ -55,12 +64,14 @@ class FallbackHandler:
         gate=None,  # QualityGate-compatible (has .evaluate)
         asr_mt: AsrMtProvider | None = None,
         rechunker: Rechunker | None = None,
+        conservative: ConservativeRetry | None = None,
         config: QualityGateConfig | None = None,
     ) -> None:
         self.engine = engine
         self.gate = gate
         self.asr_mt = asr_mt
         self.rechunker = rechunker
+        self.conservative = conservative
         self.config = config or QualityGateConfig()
 
     # ---- internal helpers -------------------------------------------------
@@ -100,9 +111,14 @@ class FallbackHandler:
         trace: list[dict] = [self._entry("primary", chunk.id, primary)]
         best = primary
 
-        # Stage 2: conservative retry (same engine, full chunk).
+        # Stage 2: conservative retry (explicit seam; identity mode when
+        # no seam is bound — ordinary engine.translate).
         if cfg.retry_once:
-            retried = self.engine.translate(chunk, target_lang)
+            retry_translate = (
+                self.conservative if self.conservative is not None
+                else self.engine.translate
+            )
+            retried = retry_translate(chunk, target_lang)
             d = self._evaluate(retried, chunk, target_lang)
             if not d.needs_retry:
                 d.fallback_path = "retry"
@@ -110,23 +126,36 @@ class FallbackHandler:
             trace.append(self._entry("retry", chunk.id, d))
             best = _better(best, d)
 
-        # Stage 3: rechunk into tighter sub-chunks; best accepted wins.
+        # Stage 3: rechunk -> COMPOSE a parent-level candidate.
         if self.rechunker is not None and cfg.rechunk_on_failure:
             subs = self.rechunker.rechunk(chunk)
-            accepted: list[GateDecision] = []
+            sub_decisions: list[GateDecision] = []
+            all_valid = True
             for i, sub in enumerate(subs):
                 r = self.engine.translate(sub, target_lang)
                 ds = self._evaluate(r, sub, target_lang)
-                stage = f"rechunk[{i}]"
-                trace.append(self._entry(stage, sub.id, ds))
-                if not ds.needs_retry:
-                    accepted.append(ds)
+                trace.append(self._entry(f"rechunk[{i}]", sub.id, ds))
+                if ds.needs_retry:
+                    all_valid = False
                 else:
-                    best = _better(best, ds)
-            if accepted:
-                win = max(accepted, key=lambda d: d.result.confidence)
-                win.fallback_path = "rechunk"
-                return self._finalize(win, trace, chunk.id)
+                    sub_decisions.append(ds)
+                # Partial sub-chunks never compete for `best`.
+            if all_valid and sub_decisions:
+                texts = [d.result.raw_text.strip() for d in sub_decisions]
+                composed = EngineResult(
+                    chunk_id=chunk.id,
+                    raw_text=" ".join(t for t in texts if t),
+                    confidence=min(d.result.confidence for d in sub_decisions),
+                    source_lang_guess=sub_decisions[0].result.source_lang_guess,
+                    timing_ms={"rechunk_subs": [d.chunk_id for d in sub_decisions]},
+                    target_lang=target_lang,
+                )
+                dc = self._evaluate(composed, chunk, target_lang)
+                if not dc.needs_retry:
+                    dc.fallback_path = "rechunk"
+                    return self._finalize(dc, trace + [self._entry("rechunk", chunk.id, dc)], chunk.id)
+                trace.append(self._entry("rechunk", chunk.id, dc))
+                best = _better(best, dc)  # parent-level candidate may compete
 
         # Stage 4: ASR+MT on the ORIGINAL chunk.
         if self.asr_mt is not None and cfg.fallback_to_asr_mt:
@@ -137,12 +166,9 @@ class FallbackHandler:
                 return self._finalize(dm, trace + [self._entry("asr_mt", chunk.id, dm)], chunk.id)
             trace.append(self._entry("asr_mt", chunk.id, dm))
             best = _better(best, dm)
-        elif self.asr_mt is None:
-            trace.append({"stage": "asr_mt", "chunk_id": chunk.id,
-                          "accepted": False, "checks": {},
-                          "note": "provider not configured"})
 
-        # Stage 5: exhausted -> best-effort flagged output.
+        # Stage 5: exhausted -> best-effort flagged output (parent-level
+        # candidates only, by construction).
         best.accepted = False
         best.low_confidence = True
         best.fallback_path = "exhausted"
@@ -167,8 +193,7 @@ def format_trace(decision: GateDecision) -> str:
         stage = e["stage"]
         if e.get("accepted"):
             verdict = "accepted"
-        elif e.get("note") in ("provider not configured",
-                               "best-effort flagged output"):
+        elif e.get("note"):
             verdict = e["note"]
         else:
             reason = next((k for k, v in (e.get("checks") or {}).items() if v), "")
