@@ -80,14 +80,22 @@ def run_eval(
         )
 
     ref_rows = [r for r in rows if r["has_reference"]]
+    # WER eligibility is stricter than textual-reference presence: a
+    # reference that normalizes to zero words (e.g. punctuation-only)
+    # cannot enter WER denominators — wer_counts returns (None, 0, 0)
+    # for it, and summing None would crash aggregation.
+    wer_rows = [
+        r for r in ref_rows if r["_n_ref"] > 0 and r["wer"] is not None
+    ]
     metrics = {
         "macro_wer": (
-            100.0 * sum(r["wer"] for r in ref_rows) / len(ref_rows) if ref_rows else None
+            100.0 * sum(r["wer"] for r in wer_rows) / len(wer_rows)
+            if wer_rows else None
         ),
         "corpus_wer": (
-            100.0 * sum(r["_edits"] for r in ref_rows)
-            / max(1, sum(r["_n_ref"] for r in ref_rows))
-            if ref_rows else None
+            100.0 * sum(r["_edits"] for r in wer_rows)
+            / max(1, sum(r["_n_ref"] for r in wer_rows))
+            if wer_rows else None
         ),
         "mean_chrf": (
             sum(r["chrf"] for r in ref_rows) / len(ref_rows) if ref_rows else None
@@ -101,6 +109,7 @@ def run_eval(
         "target_lang": target_lang,
         "n_clips": len(rows),
         "n_referenced": len(ref_rows),
+        "n_wer_referenced": len(wer_rows),
         "metrics": metrics,
         "clips": clips,
     }

@@ -57,7 +57,16 @@ def make_pipeline_transcriber(
         for s in segments:
             d = decisions.get(s.chunk_id)
             if d is not None:
-                trace.extend(e for e in d.log if isinstance(e, dict))
+                # Raw entries preserved verbatim, but every entry leaves
+                # with chunk attribution: entries lacking chunk_id (e.g.
+                # a plain gate evaluate record on primary-success chunks)
+                # get it filled in a COPY — no stage synthesis, no
+                # orchestration here.
+                for e in d.log:
+                    if isinstance(e, dict):
+                        e = dict(e)
+                        e.setdefault("chunk_id", s.chunk_id)
+                        trace.append(e)
                 if getattr(d, "fallback_path", None):
                     paths.append(d.fallback_path)
                 trace_texts.append(format_trace(d))

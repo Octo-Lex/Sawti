@@ -202,3 +202,88 @@ def test_fallback_stage_sequence_preserved_in_report(tmp_path: Path):
     assert clip["low_confidence"] is False
     # The human-readable rendering exists but metrics consumed structure.
     assert "asr_mt        -> accepted" in clip["trace_text"]
+
+
+# --- corrective pass: zero-word references + chunk attribution ---
+
+def test_punctuation_only_reference_pins_zero_words():
+    # Non-empty TEXTUAL references that normalize to zero words (ASCII
+    # punctuation is stripped by the spike recipe).
+    assert wer_counts("...", "anything") == (None, 0.0, 0)
+    assert wer_counts("!? ... ---", "anything") == (None, 0.0, 0)
+    # Documented recipe consequence: Arabic-script punctuation (، ؛)
+    # SURVIVES normalization (spike-consistent) and therefore counts as
+    # word-bearing — it enters WER denominators as garbage words rather
+    # than being zero-word-excluded.
+    assert wer_counts("، ؛", "anything")[2] == 2
+
+
+def test_zero_word_reference_no_crash_no_contamination(tmp_path: Path):
+    _mk_clip(tmp_path, "punct", "...")            # textual ref, zero words
+    _mk_clip(tmp_path, "valid", "a b")
+    tr = _fake_transcriber(
+        {
+            "punct.wav": Transcription(hypothesis="some guess"),
+            "valid.wav": Transcription(hypothesis="a b"),
+        }
+    )
+    out = run_eval(tmp_path, target_lang="eng", transcriber=tr, output_dir=tmp_path)
+    report = json.loads(Path(out).read_text(encoding="utf-8"))   # no crash
+
+    # Presence vs WER-eligibility denominators are now explicit.
+    assert report["n_referenced"] == 2
+    assert report["n_wer_referenced"] == 1
+    punct = report["clips"][0]
+    assert punct["has_reference"] is True and punct["wer"] is None
+    # The valid clip's aggregates are uncontaminated.
+    assert report["metrics"]["macro_wer"] == pytest.approx(0.0)
+    assert report["metrics"]["corpus_wer"] == pytest.approx(0.0)
+    assert report["metrics"]["mean_chrf"] is not None   # chrF still uses ref_rows
+
+
+def test_all_zero_word_references_wer_none_not_zero(tmp_path: Path):
+    _mk_clip(tmp_path, "only", "...")
+    tr = _fake_transcriber({"only.wav": Transcription(hypothesis="x")})
+    out = run_eval(tmp_path, target_lang="eng", transcriber=tr, output_dir=tmp_path)
+    report = json.loads(Path(out).read_text(encoding="utf-8"))
+    assert report["n_referenced"] == 1
+    assert report["n_wer_referenced"] == 0
+    assert report["metrics"]["macro_wer"] is None    # None, not 0.0
+    assert report["metrics"]["corpus_wer"] is None
+
+
+def test_every_trace_entry_is_chunk_attributed(tmp_path: Path):
+    """Happy-path multi-chunk clip: gate entries without stage keys still
+    leave the adapter with chunk attribution (filled in copies — no stage
+    synthesis)."""
+    from sawti.engine import EngineManager, StubEngine
+    from sawti.pipeline import Pipeline
+    from sawti.postprocess import StubPostProcessor
+    from sawti.quality_gate import StubQualityGate
+    from sawti.segmenter import StubSegmenter
+
+    _mk_clip(tmp_path, "multi", "hello hello", dur_s=4.0)  # 2 chunks under stubs
+
+    def factory(on_decision=None):
+        return Pipeline(
+            segmenter=StubSegmenter(chunk_frames=2, sample_rate=16000),
+            engine=EngineManager(engine=StubEngine("hello", 0.9)),
+            gate=StubQualityGate(),
+            postprocessor=StubPostProcessor(),
+            on_decision=on_decision,
+        )
+
+    transcriber = make_pipeline_transcriber(factory, "eng", frame_samples=16000)
+    out = run_eval(tmp_path, target_lang="eng", transcriber=transcriber,
+                   output_dir=tmp_path)
+    report = json.loads(Path(out).read_text(encoding="utf-8"))
+    clip = report["clips"][0]
+    assert clip["hypothesis"] == "hello hello"
+
+    entries = [e for e in clip["trace"] if isinstance(e, dict)]
+    assert entries, "expected trace entries on the happy path"
+    assert all("chunk_id" in e for e in entries)     # full attribution
+    ids = {e["chunk_id"] for e in entries}
+    assert ids == {"c0", "c1"}                        # both chunks covered
+    # Primary-success gate records stay unstaged (no synthesis).
+    assert all("stage" not in e for e in entries)
