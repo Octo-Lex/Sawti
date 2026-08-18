@@ -33,23 +33,12 @@ def _stub_pipeline(on_decision=None) -> Pipeline:
     )
 
 
-def _real_pipeline(config: SawtiConfig) -> Pipeline:
-    from sawti.engine_m4t import SeamlessM4TEngine
-    from sawti.segmenter_silero import RealSegmenter
-    from sawti.vad import SileroVad
+def _real_pipeline(config: SawtiConfig, on_decision=None) -> Pipeline:
+    """The ONE production graph (sawti/build.py): full recovery stack with
+    conservative retry, rechunker, and the real ASR+MT provider."""
+    from sawti.build import build_real_pipeline
 
-    device = config.s2tt.device
-    from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToText
-    processor = AutoProcessor.from_pretrained("facebook/seamless-m4t-v2-large")
-    model = SeamlessM4Tv2ForSpeechToText.from_pretrained("facebook/seamless-m4t-v2-large")
-    # SeamlessM4TEngine moves the model to `device` itself.
-    engine = SeamlessM4TEngine(processor=processor, model=model, device=device)
-    return Pipeline(
-        segmenter=RealSegmenter(vad=SileroVad(), config=config.segmentation),
-        engine=EngineManager(engine=engine, config=config.s2tt),
-        gate=BalancedQualityGate(config=config.quality_gate),
-        postprocessor=RealPostProcessor(config=config.postprocess),
-    )
+    return build_real_pipeline(config, on_decision=on_decision)
 
 
 @app.command()
@@ -77,17 +66,28 @@ def transcribe(
 def eval(
     eval_set: Path = typer.Argument(..., help="Eval set directory"),
     target: str = typer.Option("eng", help="Target language: eng|ara|fra"),
+    engine: str = typer.Option(
+        "stub", help="stub: real execution of stub components (no models); "
+                     "real: the full production graph (loads M4T/Whisper)"),
+    config_path: Path = typer.Option(Path("config/default.yaml"), help="Config YAML"),
 ) -> None:
-    """Run the evaluation harness through a real (stub-component) pipeline."""
+    """Run the evaluation harness through a real pipeline."""
+    from sawti.env import load_env
+
+    load_env(override=True)  # entry edge: .env may correct OS env (see env.py)
     from eval.harness import run_eval
     from eval.transcribers import make_pipeline_transcriber
 
-    # Commit 5: the harness executes an injected pipeline — no stub
-    # hypotheses. Until Commit 6 binds the production builder, the CLI
-    # evaluates via the STUB pipeline: a real execution of stub components.
-    transcriber = make_pipeline_transcriber(
-        lambda on_decision=None: _stub_pipeline(on_decision=on_decision), target
-    )
+    if engine == "real":
+        config = load_config(config_path) if config_path.exists() else SawtiConfig()
+        factory = lambda on_decision=None: _real_pipeline(  # noqa: E731
+            config, on_decision=on_decision)
+    else:
+        # Explicit stub mode: a real execution of stub components — the
+        # same seam, no models. Not a stubbed hypothesis.
+        factory = lambda on_decision=None: _stub_pipeline(  # noqa: E731
+            on_decision=on_decision)
+    transcriber = make_pipeline_transcriber(factory, target)
     report = run_eval(eval_set, target_lang=target, transcriber=transcriber)
     typer.echo(f"Wrote report: {report}")
 

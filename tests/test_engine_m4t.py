@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 import numpy as np
 
 from sawti.engine_m4t import SeamlessM4TEngine
@@ -41,3 +43,35 @@ def test_engine_confidence_from_scores():
     eng = SeamlessM4TEngine(processor=processor, model=model, return_scores=True)
     r = eng.translate(_chunk(), target_lang="eng")
     assert 0.0 <= r.confidence <= 1.0
+
+
+def test_conservative_mode_passes_distinct_generation_kwargs():
+    """Primary and conservative passes use the SAME model but observably
+    different generation kwargs (beam search, no sampling)."""
+    processor = MagicMock()
+    model = MagicMock()
+    model.generate.return_value = [[1, 2, 3]]
+    processor.decode.return_value = "text"
+    eng = SeamlessM4TEngine(processor=processor, model=model)
+    eng.translate(_chunk(), target_lang="eng")                     # primary
+    eng.translate(_chunk(), target_lang="eng", conservative=True)  # retry
+    calls = model.generate.call_args_list
+    primary_kwargs = calls[0].kwargs
+    conservative_kwargs = calls[1].kwargs
+    assert "num_beams" not in primary_kwargs
+    assert conservative_kwargs["num_beams"] == 5
+    assert conservative_kwargs["do_sample"] is False
+
+
+def test_device_placement_failure_surfaces():
+    """A failing .to(device) must raise, not silently continue. Uses a
+    plain fake (NOT a MagicMock — the _is_mock guard intentionally skips
+    device-moving test doubles)."""
+
+    class FailingToDevice:
+        def to(self, device):
+            raise RuntimeError("CUDA out of memory")
+
+    with pytest.raises(RuntimeError, match="CUDA out of memory"):
+        SeamlessM4TEngine(processor=MagicMock(), model=FailingToDevice(),
+                          device="cuda")

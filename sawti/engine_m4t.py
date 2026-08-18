@@ -44,13 +44,13 @@ class SeamlessM4TEngine:
         # unit tests (MagicMock) respond to `.to` but return a different mock,
         # which would break later assertions — so we skip moving fakes.
         if not _is_mock(model):
-            try:
-                model = model.to(device)
-            except Exception:
-                pass  # fakes without a working .to() are left as-is
+            # Device-placement failures MUST surface: a requested CUDA
+            # placement that fails should raise, not silently run elsewhere.
+            model = model.to(device)
         self.model = model
 
-    def translate(self, chunk: AudioChunk, target_lang: str) -> EngineResult:
+    def translate(self, chunk: AudioChunk, target_lang: str,
+                  conservative: bool = False) -> EngineResult:
         tgt = to_m4t_lang(target_lang)
         t0 = time.perf_counter()
         # processor expects a raw audio array (float32, 16kHz mono).
@@ -65,6 +65,11 @@ class SeamlessM4TEngine:
         # `generate_speech` flag (that exists only on the speech-to-speech
         # class). Pass just the target lang (+ optional score return).
         gen_kwargs = dict(tgt_lang=tgt)
+        if conservative:
+            # Deterministic conservative decoding on the SAME loaded model:
+            # beam search, no sampling — observably distinct from the
+            # primary pass, no second M4T instance.
+            gen_kwargs.update(num_beams=5, do_sample=False)
         if self.return_scores:
             gen_kwargs.update(return_dict_in_generate=True, output_scores=True)
         out = self.model.generate(**inputs, **gen_kwargs)
