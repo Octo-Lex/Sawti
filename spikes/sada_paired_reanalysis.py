@@ -2,9 +2,10 @@
 
 Supersedes the first paired correction (Addendum 3): that version still used
 the legacy unigram/dominance loop detector, which misses the x3 phrase-loop
-failure mode it was supposed to exclude. This version uses the n-gram
-repetition detector (1-8-token spans, >=3 consecutive repeats, plus the
-legacy dominance signal) — self-tested against the known examples.
+failure mode it was supposed to exclude. This version uses the SHARED
+PRODUCTION detector (sawti.loop_detect.is_loop — pure consecutive-block
+semantics, 1-8-token spans, >=3 repeats; lexical frequency NEVER gates),
+identical to the training evaluator and the runtime quality gate.
 
 Four views per reviewer spec:
   1. paired common-clean WER  — non-degenerate under BOTH models (n-gram rule)
@@ -83,7 +84,7 @@ def main() -> None:
     models = load_all()
     base = models[BASE]
     all_ids = sorted(base.keys())
-    report: dict = {"base": BASE, "detector": "ngram(1-8,>=3)+dominance", "models": {}}
+    report: dict = {"base": BASE, "detector": "shared:sawti.loop_detect(consecutive-only)", "models": {}}
 
     print(f"BASE = {BASE} (n={len(all_ids)} clips)")
     hdr = (f"{'model':26s} | {'clean macro':>15s} | {'allval macro':>13s} "

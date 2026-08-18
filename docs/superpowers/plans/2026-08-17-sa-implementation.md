@@ -339,7 +339,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-import sawti.env  # noqa: F401
+# (No env loading here: tests/conftest.py owns the test-runner edge.)
 
 CORE = ["Najdi", "Hijazi", "Khaliji"]
 MAX_S = 30.0   # Whisper native window; longer clips are dropped (logged)
@@ -1279,7 +1279,9 @@ from unittest.mock import MagicMock
 import numpy as np
 
 from sawti.build_sa import build_sawti_sa_pipeline
+from sawti.engine import StubEngine
 from sawti.pipeline import Pipeline
+from sawti.segmenter import StubSegmenter
 from sawti.sources import StubAudioSource
 
 
@@ -1293,14 +1295,18 @@ def test_sa_build_delegates_to_m1_graph_with_sa_provider(tmp_path):
     pipe = build_sawti_sa_pipeline(
         sa_model_dir=str(tmp_path),          # unused with injected provider
         provider=fake_provider,
+        # HERMETIC: inject the M1 builder's engine + segmenter too —
+        # default load_policy is resident, so an uninjected engine would
+        # eagerly load real M4T despite the fake provider.
+        m4t_engine=StubEngine("hi", 0.9),
+        segmenter=StubSegmenter(chunk_frames=2, sample_rate=16000),
     )
     assert isinstance(pipe, Pipeline)
     assert pipe.fallback is not None          # M1 recovery stack
     assert pipe.fallback.asr_mt is fake_provider
     assert pipe.fallback.conservative is not None
     assert pipe.fallback.rechunker is not None
-    # Happy path through the (stub-injected) M1 engine never calls SA:
-    from sawti.engine import EngineManager, StubEngine
+    # Happy path through the stub M1 engine never calls SA:
     src = StubAudioSource(n_frames=2, samples_per_frame=16000)
     out = list(pipe.run(src, target_lang="eng"))
     assert fake_provider.asr_mt.call_count == 0
