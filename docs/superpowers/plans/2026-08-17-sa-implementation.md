@@ -95,7 +95,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from sawti.training.eval_utils import aggregate, is_loop, norm, wer_clean
+from sawti.training.eval_utils import (aggregate, annotate_degenerate,
+                                    is_loop, norm, wer_clean)
 
 
 def test_norm_unifies_arabic_and_strips_punct():
@@ -123,18 +124,41 @@ def test_wer_clean_basic():
     assert wer_clean("احمد", "احمد ذهب") == pytest.approx(0.5)
 
 
-def test_aggregate_per_dialect(tmp_path: Path):
+def test_annotate_degenerate_sets_metric_fields():
     rows = [
-        {"clip_id": "a", "dialect": "Najdi", "wer": 0.2, "degenerate": False},
-        {"clip_id": "b", "dialect": "Najdi", "wer": 0.4, "degenerate": False},
-        {"clip_id": "c", "dialect": "Najdi", "wer": 9.9, "degenerate": True},
-        {"clip_id": "d", "dialect": "Hijazi", "wer": 0.5, "degenerate": False},
+        {"dialect": "Najdi", "duration_s": 5.0, "cleaned_text": "مرحبا بك",
+         "hyp": "مرحبا بك", "wer": 0.0},
+        {"dialect": "Najdi", "duration_s": 5.0, "cleaned_text": "كلمة",
+         "hyp": "اشتركوا في القناه اشتركوا في القناه اشتركوا في القناه", "wer": 9.0},
+        {"dialect": "Hijazi", "duration_s": 0.5, "cleaned_text": "نعم",
+         "hyp": "نعم", "wer": 0.0},
+    ]
+    out = annotate_degenerate(rows)
+    assert out[0]["loop"] is False and out[0]["valid_ref"] is True
+    assert out[0]["n_ref_words"] == 2
+    assert out[1]["loop"] is True and out[1]["degenerate"] is True  # phrase loop
+    assert out[2]["degenerate"] is True  # short clip
+
+
+def test_aggregate_exposes_full_metric_set():
+    rows = [
+        {"dialect": "Najdi", "duration_s": 5.0, "cleaned_text": "مرحبا بك",
+         "hyp": "مرحبا بك", "wer": 0.0, "loop": False, "degenerate": False,
+         "valid_ref": True, "n_ref_words": 2},
+        {"dialect": "Najdi", "duration_s": 5.0, "cleaned_text": "كلمة واحدة",
+         "hyp": "كلمة", "wer": 0.5, "loop": False, "degenerate": False,
+         "valid_ref": True, "n_ref_words": 2},
+        {"dialect": "Hijazi", "duration_s": 5.0, "cleaned_text": "كلمة",
+         "hyp": "اشتركوا في القناه " * 3, "wer": 9.0, "loop": True,
+         "degenerate": True, "valid_ref": True, "n_ref_words": 1},
     ]
     out = aggregate(rows)
-    assert out["overall"]["wer"] == pytest.approx(100 * (0.2 + 0.4 + 0.5) / 3)
-    assert out["overall"]["n"] == 3
-    assert out["per_dialect"]["Najdi"]["wer"] == pytest.approx(30.0)
-    assert out["degenerate_rate"] == pytest.approx(25.0)
+    assert out["clean_macro_wer"] == pytest.approx(25.0)          # (0 + 0.5) / 2
+    assert out["all_valid_macro_wer"] == pytest.approx(100 * (0 + 0.5 + 9) / 3)
+    assert out["all_valid_corpus_wer"] == pytest.approx(100 * (0 * 2 + 0.5 * 2 + 9 * 1) / 5)
+    assert out["loop_pct"] == pytest.approx(100 / 3)
+    assert out["per_dialect"]["Najdi"]["clean_macro_wer"] == pytest.approx(25.0)
+    assert out["per_dialect"]["Hijazi"]["n_clean"] == 0
 ```
 - [ ] **Step 2:** `uv run pytest tests/test_eval_utils.py -v` → FAIL (ModuleNotFoundError).
 - [ ] **Step 3: Implement** — `sawti/training/eval_utils.py`:
@@ -146,9 +170,12 @@ produce identical numbers. Mirrors the spike scripts exactly.
 """
 from __future__ import annotations
 
+import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
+
+import numpy as np
 
 from sawti.text_normalize import normalize_arabic_for_match
 
@@ -203,31 +230,58 @@ def load_manifest(data_dir: str | Path) -> list[dict]:
 
 
 def annotate_degenerate(rows: list[dict]) -> list[dict]:
+    """Sets every field aggregate() needs: loop flag (n-gram), degenerate,
+    valid_ref, and reference word count (for corpus WER)."""
     for r in rows:
+        ref = (r.get("cleaned_text") or r.get("text") or "").strip()
+        n_ref = norm(ref)
+        r["loop"] = is_loop(r.get("hyp", ""))
         r["degenerate"] = (
-            r.get("duration_s", 99) < 1.0 or is_loop(r.get("hyp", "")) or r.get("wer") is None
+            r.get("duration_s", 99) < 1.0 or r["loop"] or r.get("wer") is None
         )
+        r["valid_ref"] = bool(n_ref)
+        r["n_ref_words"] = len(n_ref.split())
     return rows
 
 
-def aggregate(rows: list[dict]) -> dict:
-    import numpy as np
+def _macro(rows: list[dict]) -> float:
+    w = [r["wer"] for r in rows if r.get("wer") is not None]
+    return 100 * float(np.mean(w)) if w else float("nan")
 
+
+def _corpus(rows: list[dict]) -> float:
+    """Corpus WER over valid-reference rows: per-clip WER weighted by
+    reference word count (exact from stored values)."""
+    err = total = 0.0
+    for r in rows:
+        if r.get("wer") is None:
+            continue
+        err += r["wer"] * r["n_ref_words"]
+        total += r["n_ref_words"]
+    return 100 * err / total if total else float("nan")
+
+
+def aggregate(rows: list[dict]) -> dict:
+    """Full Addendum-4 metric set: clean macro WER (checkpoint gate),
+    n-gram loop-rate (eligibility constraint), all-valid macro AND corpus
+    (robustness views), per-dialect clean metrics."""
     by_d: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_d[r["dialect"]].append(r)
     per = {}
     for d, rs in by_d.items():
-        w = [r["wer"] for r in rs if not r["degenerate"] and r["wer"] is not None]
-        per[d] = {"wer": 100 * float(np.mean(w)) if w else float("nan"), "n": len(w)}
-    clean = [r for r in rows if not r["degenerate"] and r["wer"] is not None]
+        clean = [r for r in rs if not r["degenerate"]]
+        per[d] = {"clean_macro_wer": _macro(clean), "n_clean": len(clean)}
+    valid = [r for r in rows if r.get("valid_ref")]
+    clean_all = [r for r in rows if not r["degenerate"]]
     return {
-        "overall": {
-            "wer": 100 * float(np.mean([r["wer"] for r in clean])) if clean else float("nan"),
-            "n": len(clean),
-        },
-        "per_dialect": per,
+        "clean_macro_wer": _macro(clean_all),
+        "all_valid_macro_wer": _macro(valid),
+        "all_valid_corpus_wer": _corpus(valid),
+        "loop_pct": 100 * sum(bool(r.get("loop")) for r in rows) / max(1, len(rows)),
         "degenerate_rate": 100 * sum(bool(r["degenerate"]) for r in rows) / max(1, len(rows)),
+        "per_dialect": per,
+        "n": len(rows),
     }
 
 
@@ -240,10 +294,8 @@ def run_eval(asr_fn, data_dir: str | Path) -> list[dict]:
         rows.append({**m, "hyp": hyp, "wer": wer_clean(ref, hyp)})
     return annotate_degenerate(rows)
 
-
-import json  # noqa: E402  (kept low to mirror usage ordering)
 ```
-- [ ] **Step 4:** `uv run pytest tests/test_eval_utils.py -v` → 5 PASS (incl. phrase-loop regression). Full suite green.
+- [ ] **Step 4:** `uv run pytest tests/test_eval_utils.py -v` → 6 PASS (incl. phrase-loop regression + full metric-set contract). Full suite green.
 - [ ] **Step 5:** Commit: `feat(training): shared Saudi eval utils (norm/loop/aggregate)`.
 
 ---
@@ -679,33 +731,61 @@ class _Ctl:
         self.should_training_stop = False
 
 
-def test_dev_callback_tracks_best_and_stops_after_3_regressions(tmp_path):
+def _metrics(wer, loop=0.0):
+    return {"clean_macro_wer": wer, "all_valid_macro_wer": wer * 2.0,
+            "all_valid_corpus_wer": wer, "loop_pct": loop,
+            "degenerate_rate": loop, "per_dialect": {}, "n": 59}
+
+
+def test_dev_callback_best_tracking_and_stop_after_3_regressions(tmp_path):
     from sawti.training.train_qlora import DevEvalCallback
 
-    scores = iter([40.0, 30.0, 35.0, 36.0, 37.0])
-    cb = DevEvalCallback(
-        eval_fn=lambda model: {"overall": {"wer": next(scores), "n": 59},
-                               "degenerate_rate": 5.0},
-        log_path=str(tmp_path / "dev_log.jsonl"), patience=3)
+    seq = iter([_metrics(40.0), _metrics(30.0), _metrics(35.0),
+                _metrics(36.0), _metrics(37.0)])
+    cb = DevEvalCallback(eval_fn=lambda m: next(seq),
+                         log_path=str(tmp_path / "dev_log.jsonl"), patience=3)
     for _ in range(5):
         cb.on_save(args=None, state=None, control=_Ctl(), model=None)
     log = [__import__("json").loads(l) for l in
            (tmp_path / "dev_log.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert log[1]["overall"]["wer"] == 30.0 and log[1]["is_best"] is True
+    assert log[1]["clean_macro_wer"] == 30.0 and log[1]["is_best"] is True
+    assert log[1]["all_valid_macro_wer"] == 60.0  # all four metrics logged
     stops = [l for l in log if l.get("stop")]
-    assert stops and stops[0]["eval_index"] == 4  # 3 consecutive regressions
+    assert stops and stops[0]["eval_index"] == 5  # regressions at evals 3,4,5
+
+
+def test_dev_callback_loop_constraint_blocks_ineligible_best(tmp_path):
+    from sawti.training.train_qlora import DevEvalCallback
+
+    seq = iter([_metrics(40.0, loop=0.0), _metrics(20.0, loop=9.0),
+                _metrics(35.0, loop=0.0)])
+    cb = DevEvalCallback(eval_fn=lambda m: next(seq),
+                         log_path=str(tmp_path / "dev_log.jsonl"), patience=3)
+    for _ in range(3):
+        cb.on_save(args=None, state=None, control=_Ctl(), model=None)
+    log = [__import__("json").loads(l) for l in
+           (tmp_path / "dev_log.jsonl").read_text(encoding="utf-8").splitlines()]
+    # eval 2: best raw WER (20.0) but loop 9% > limit -> ineligible, not best
+    assert log[1]["eligible"] is False and log[1]["is_best"] is False
+    # eval 3: eligible and better than the standing best (40.0) -> new best
+    assert log[2]["is_best"] is True and log[2]["best_clean_macro_wer"] == 35.0
 ```
 - [ ] **Step 2:** FAIL, then **append to** `sawti/training/train_qlora.py`:
 ```python
 class DevEvalCallback:
-    """Evaluates on the 75-clip Saudi dev set at each save point; tracks best
-    WER; stops training after `patience` consecutive regressions. Spec §2.4:
-    checkpoint selection on held-out Saudi dev, never on train loss."""
+    """Evaluates on the 75-clip Saudi dev set at each save point. Selection
+    rule (spec §2.4, Addendum 4 metric set): a checkpoint is ELIGIBLE only
+    when its n-gram loop-rate <= loop_limit_pct; among eligible checkpoints
+    the lowest clean macro WER wins. All four first-class metrics are logged
+    (clean macro, all-valid macro, all-valid corpus, loop-rate). An
+    ineligible eval counts toward the regression/stop counter."""
 
-    def __init__(self, eval_fn, log_path: str, patience: int = 3) -> None:
+    def __init__(self, eval_fn, log_path: str, patience: int = 3,
+                 loop_limit_pct: float = 5.0) -> None:
         self.eval_fn = eval_fn
         self.log_path = log_path
         self.patience = patience
+        self.loop_limit_pct = loop_limit_pct
         self.best = float("inf")
         self.regress = 0
         self.eval_index = 0
@@ -719,8 +799,10 @@ class DevEvalCallback:
     def on_save(self, args, state, control, model=None, **kw) -> None:
         self.eval_index += 1
         result = self.eval_fn(model)
-        wer = result["overall"]["wer"]
-        is_best = wer < self.best
+        wer = result["clean_macro_wer"]
+        loop = result["loop_pct"]
+        eligible = loop <= self.loop_limit_pct
+        is_best = eligible and wer < self.best
         if is_best:
             self.best, self.regress = wer, 0
         else:
@@ -730,12 +812,18 @@ class DevEvalCallback:
             control.should_training_stop = True
         self._log({
             "eval_index": self.eval_index,
-            "overall": result["overall"],
-            "degenerate_rate": result["degenerate_rate"],
-            "is_best": is_best, "best_wer": self.best,
-            "consecutive_regressions": self.regress, "stop": stop,
+            "clean_macro_wer": wer,
+            "all_valid_macro_wer": result["all_valid_macro_wer"],
+            "all_valid_corpus_wer": result["all_valid_corpus_wer"],
+            "loop_pct": loop,
+            "eligible": eligible,
+            "is_best": is_best,
+            "best_clean_macro_wer": self.best,
+            "consecutive_regressions": self.regress,
+            "stop": stop,
         })
-        print(f"[dev-eval {self.eval_index}] WER {wer:.1f}% best {self.best:.1f}% "
+        print(f"[dev-eval {self.eval_index}] clean {wer:.1f}% loop {loop:.1f}% "
+              f"{'ELIGIBLE' if eligible else 'INELIGIBLE'} best {self.best:.1f}% "
               f"regress {self.regress}/{self.patience}{' STOP' if stop else ''}")
 
 
@@ -808,7 +896,7 @@ if __name__ == "__main__":
     main()
 ```
 Add `import json` to the module's top-level imports (used by `_log` and probe docs).
-- [ ] **Step 3:** `uv run pytest tests/test_train_qlora.py -v` → 4 PASS. Commit `feat(training): dev-eval callback with early stop + training entrypoint`.
+- [ ] **Step 3:** `uv run pytest tests/test_train_qlora.py -v` → 5 PASS (3 config + 2 callback, incl. loop-constraint eligibility). Commit `feat(training): dev-eval callback with early stop + training entrypoint`.
 
 ---
 
@@ -1235,9 +1323,10 @@ def test_merged_model_on_dev_sample():
         "language": "arabic", "task": "transcribe"})["text"].strip(),
         "data/sada_spike")
     agg = aggregate(rows)
-    print(f"\n[integration] dev WER {agg['overall']['wer']:.1f}% "
-          f"degenerate {agg['degenerate_rate']:.0f}%")
-    assert agg["overall"]["n"] > 0
+    print(f"\n[integration] clean {agg['clean_macro_wer']:.1f}% | loop "
+          f"{agg['loop_pct']:.0f}% | allvalid macro/corpus "
+          f"{agg['all_valid_macro_wer']:.1f}/{agg['all_valid_corpus_wer']:.1f}%")
+    assert agg["n"] > 0
 
 
 @pytest.mark.integration
@@ -1284,7 +1373,7 @@ Path("data/sada_training/test/final_eval.json").write_text(
 print(json.dumps(agg, indent=1, ensure_ascii=False))
 PY
   ```
-- [ ] **Step 3:** Write the success verdict into the research report (Addendum 5): clean macro WER ≤ 20%? n-gram loop-rate < 5%? every dialect < its zero-shot on paired clean macro (Najdi 29.4 / Hijazi 44.2 / Khaliji 53.7)? Also REPORT (not gate) all-valid macro AND corpus WER vs base (287.4% / 76.2%). State PASS/FAIL per criterion — an honest FAIL is a valid milestone outcome and triggers iteration (more steps/data), not reframing.
+- [ ] **Step 3:** Write the success verdict into the research report (Addendum 5), reading the emitted `aggregate()` fields: `clean_macro_wer` ≤ 20%? `loop_pct` < 5? every `per_dialect[d]['clean_macro_wer']` < its zero-shot (Najdi 29.4 / Hijazi 44.2 / Khaliji 53.7)? Also REPORT (not gate) `all_valid_macro_wer` AND `all_valid_corpus_wer` vs base (287.4% / 76.2%). State PASS/FAIL per criterion — an honest FAIL is a valid milestone outcome and triggers iteration (more steps/data), not reframing.
 - [ ] **Step 4:** Commit report + any fixes. Merge PR.
 
 ---
