@@ -68,6 +68,9 @@ class RealSegmenter:
 
         # Open-chunk state.
         opened = False
+        tail_len = 0              # borrowed prev-tail samples inside this
+                                  # candidate (0 when opened fresh); NOT part
+                                  # of the inter-emission gap on rejection
         timeline_start = 0.0      # true source start of the chunk's audio
         overlap_s = 0.0           # duplicated previous-tail seconds (this chunk)
         own_start = 0.0           # first-speech start (content gates)
@@ -79,12 +82,16 @@ class RealSegmenter:
         silence_ms = 0.0
 
         def _merge_into_gap() -> None:
-            """A discarded chunk's buffered audio is intervening SOURCE
-            audio — merge it so bridge accounting stays exact."""
+            """A REJECTED candidate returns its source to the inter-emission
+            gap stream — everything after the borrowed tail (the tail
+            duplicates pre-prev_end source and stays pending for the next
+            emitted chunk; only a successful emit consumes it)."""
             nonlocal gap_parts, gap_samples
             if parts:
-                gap_parts.append(np.concatenate(parts))
-                gap_samples += buffered
+                new_source = np.concatenate(parts)[tail_len:]
+                if len(new_source):
+                    gap_parts.append(new_source)
+                    gap_samples += len(new_source)
 
         def _drop_carry_if_over_budget() -> None:
             nonlocal pending_tail, gap_parts, gap_samples
@@ -97,7 +104,7 @@ class RealSegmenter:
 
         def reset_open() -> None:
             nonlocal opened, parts, buffered, speech_end_pos
-            nonlocal speech_samples, silence_ms, overlap_s
+            nonlocal speech_samples, silence_ms, overlap_s, tail_len
             opened = False
             parts = []
             buffered = 0
@@ -105,6 +112,7 @@ class RealSegmenter:
             speech_samples = 0
             silence_ms = 0.0
             overlap_s = 0.0
+            tail_len = 0
 
         def emit(emit_end: float) -> AudioChunk | None:
             """Build the chunk [timeline_start, emit_end]; None if gates
@@ -163,8 +171,11 @@ class RealSegmenter:
                 vr = self.vad.prob(sub, sr)
                 if vr.is_speech:
                     if not opened:
-                        # Open, optionally carrying the previous tail across
-                        # the REAL bridged gap (tail | gap | this speech).
+                        # Open, BORROWING the previous tail across the real
+                        # bridged gap (tail | gap | this speech). The tail is
+                        # consumed only if this candidate actually emits; a
+                        # rejected blip returns post-tail source to the gap
+                        # stream and the carry survives.
                         if pending_tail is not None:
                             bridge = (
                                 np.concatenate(gap_parts)
@@ -172,16 +183,18 @@ class RealSegmenter:
                             )
                             parts = [pending_tail, bridge]
                             buffered = len(pending_tail) + gap_samples
+                            tail_len = len(pending_tail)
                             timeline_start = prev_end - len(pending_tail) / sr
                             overlap_s = len(pending_tail) / sr
                         else:
                             parts = []
                             buffered = 0
+                            tail_len = 0
                             timeline_start = sub_start
                             overlap_s = 0.0
-                        pending_tail = None
-                        gap_parts = []
-                        gap_samples = 0
+                        gap_parts = []   # moved into the candidate's parts
+                        gap_samples = 0  # (returned by _merge_into_gap on
+                                         # rejection, re-seeded by emit)
                         opened = True
                         own_start = sub_start
                         last_speech_end = sub_start

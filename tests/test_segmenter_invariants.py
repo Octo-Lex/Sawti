@@ -236,3 +236,63 @@ def test_ordering_and_ids_deterministic():
     for c in chunks:
         _identity(c)
         _source_equal(c, frames)
+
+
+def test_rejected_blip_does_not_consume_overlap_carry():
+    """emitted A -> gap -> blip below min_speech (rejected) -> gap ->
+    emitted B. The carry relationship is between EMITTED chunks: B must
+    still carry A's tail across the real bridge (which now contains the
+    rejected blip's source audio too), subject to the carry budget."""
+    sr = 16000
+    pattern = ([True] * 12            # A: 384ms speech
+               + [False] * 15         # gap 480ms (>= pause: A closes)
+               + [True] * 2           # blip: 64ms < min_speech_ms(100)
+               + [False] * 15         # gap 480ms
+               + [True] * 12           # B: 384ms speech
+               + [False] * 15)         # close B
+    frames, vad, _ = _ramp_frames(pattern)
+    seg = RealSegmenter(vad=vad, config=SegmentationConfig(
+        pause_threshold_ms=350, min_chunk_duration_ms=0,
+        overlap_ms=200, min_speech_ms=100))
+    chunks = list(seg.process(iter(frames)))
+
+    assert len(chunks) == 2
+    a, b = chunks
+    carry = int(200 / 1000 * sr)
+    src = _source(frames)
+
+    assert b.overlap_from_prev_s == pytest.approx(200 / 1000, abs=1e-3)
+    # Strong oracle: B's audio is the literal source slice — the bridge
+    # contains the real gaps AND the rejected blip's source samples.
+    _source_equal(b, frames)
+    _source_equal(a, frames)
+    assert b.start_time == pytest.approx(a.end_time - 200 / 1000, abs=1e-3)
+    # Head IS A's tail, on a non-constant waveform.
+    assert np.array_equal(b.audio[:carry], a.audio[-carry:])
+
+
+def test_rejected_blip_then_budget_overflow_still_drops_carry():
+    """Same sequence, but the accumulated bridge (gaps + blip) exceeds the
+    max-span carry budget: dropping the carry remains the correct outcome
+    — B opens fresh with truthful timestamps and no overlap."""
+    # Budget variant: wider gaps (640ms each) so carried(0.2s) + bridge
+    # (~1.35s incl. the blip and residues) exceeds max span 1s (int type
+    # per the frozen config) -> carry dropped, B opens fresh.
+    pattern = ([True] * 12
+               + [False] * 20
+               + [True] * 2
+               + [False] * 20
+               + [True] * 12
+               + [False] * 15)
+    frames, vad, _ = _ramp_frames(pattern)
+    seg = RealSegmenter(vad=vad, config=SegmentationConfig(
+        pause_threshold_ms=350, min_chunk_duration_ms=0,
+        overlap_ms=200, min_speech_ms=100, max_chunk_duration_s=1))
+    chunks = list(seg.process(iter(frames)))
+
+    assert len(chunks) == 2
+    a, b = chunks
+    assert b.overlap_from_prev_s == 0.0            # carry dropped by budget
+    assert b.start_time == pytest.approx(54 * W / 16000, abs=1e-3)  # own speech
+    _source_equal(a, frames)
+    _source_equal(b, frames)
