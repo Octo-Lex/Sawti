@@ -1,10 +1,12 @@
-"""Commit 4 invariants: wall-clock-true chunk semantics.
+"""Commit 4 invariants: source-time-true chunk semantics.
 
-Every test asserts the master invariant — len(audio) == (end_time -
-start_time) * sample_rate — including chunks with INTERNAL silence, and
-the specific repaired behaviors: sample_rate propagation, physical
-overlap carry (reconstruction on a non-constant waveform), min_speech
-blip gating, and min_gap preventing splits below the configured gap.
+Master oracle: every emitted chunk's audio must be the LITERAL source
+waveform for [start_time, end_time] — asserted via exact array equality
+against the reconstructed source stream. Additional regressions pin:
+sample_rate propagation, overlap carry ACROSS the real bridged gap (tail
+| actual intervening silence | new speech), max-span enforcement during
+retained silence, carry-drop when bridging would exceed max span,
+min_speech blip gating, and min_gap preventing splits below the gap.
 """
 from __future__ import annotations
 
@@ -24,14 +26,28 @@ def _ramp_frames(pattern: list[bool], start_sample: int = 0):
     sample-equality assertions are meaningful), one 512-sample frame per
     verdict; global sample position advances so timestamps are exact."""
     frames, verdicts, pos = [], [], start_sample
-    for i, speech in enumerate(pattern):
-        # deterministic non-repeating-ish ramp chunk
+    for speech in enumerate(pattern):
+        i, sp = speech
         audio = ((np.arange(pos, pos + W) % 977) / 977.0).astype(np.float32)
         frames.append(AudioFrame(audio=audio, sample_rate=16000,
                                  timestamp_s=pos / 16000))
-        verdicts.append((0.9, speech))
+        verdicts.append((0.9, sp))
         pos += W
     return frames, FakeVad(verdicts), pos
+
+
+def _source(frames) -> np.ndarray:
+    return np.concatenate([f.audio for f in frames])
+
+
+def _source_equal(chunk, frames) -> None:
+    src = _source(frames)
+    a = int(round(chunk.start_time * chunk.sample_rate))
+    b = int(round(chunk.end_time * chunk.sample_rate))
+    assert np.array_equal(chunk.audio, src[a:b]), (
+        f"chunk {chunk.id} audio is not the literal source slice "
+        f"[{chunk.start_time:.4f}, {chunk.end_time:.4f}]"
+    )
 
 
 def _identity(chunk) -> None:
@@ -51,14 +67,11 @@ def test_internal_silence_preserved_and_identity_holds():
     assert len(chunks) == 1
     c = chunks[0]
     _identity(c)
-    # Chunk spans first speech start .. last speech end: 20 speech frames
-    # PLUS the 10 internal-silence frames -> audio must contain them all.
+    _source_equal(c, frames)
     assert c.start_time == pytest.approx(0.0)
     assert c.end_time == pytest.approx(20 * W / 16000)
-    assert len(c.audio) == 20 * W
-    # And the internal silence is really in there (positions 5..15 frames).
-    internal = c.audio[5 * W:15 * W]
-    assert len(internal) == 10 * W
+    # The internal silence is really in there (positions 5..15 frames).
+    assert len(c.audio[5 * W:15 * W]) == 10 * W
 
 
 def test_sample_rate_propagates_from_input():
@@ -79,10 +92,11 @@ def test_sample_rate_propagates_from_input():
     assert len(chunks) == 1
     assert chunks[0].sample_rate == sr          # not hardcoded 16000
     _identity(chunks[0])
+    _source_equal(chunks[0], frames)
 
 
-def test_overlap_physically_carries_previous_tail():
-    # speech(12=384ms > 200ms overlap) - split pause - speech(12)
+def test_overlap_bridges_the_real_gap_source_true():
+    # speech(12=384ms) - pause(15=480ms) - speech(12); overlap 200ms.
     S, P = 12, 15
     pattern = [True] * S + [False] * P + [True] * S + [False] * P
     frames, vad, _ = _ramp_frames(pattern)
@@ -93,21 +107,79 @@ def test_overlap_physically_carries_previous_tail():
 
     assert len(chunks) == 2
     c1, c2 = chunks
-    _identity(c1)
-    _identity(c2)
+    src = _source(frames)
     carry = int(200 / 1000 * 16000)
+    prev_end = S * W / 16000
+
+    # start_time is the tail's TRUE source time (not own_start - overlap).
+    assert c2.start_time == pytest.approx(prev_end - 200 / 1000, abs=1e-3)
     assert c2.overlap_from_prev_s == pytest.approx(200 / 1000, abs=1e-3)
-    # Splice semantics: c2's timeline starts overlap-seconds before its OWN
-    # first speech (frame S+P), NOT before c1's end (a pause gap may lie
-    # between; the leading overlap re-covers c1's closing words).
-    own2_start = (S + P) * W / 16000
-    assert c2.start_time == pytest.approx(own2_start - 200 / 1000, abs=1e-3)
-    # THE reconstruction proof: chunk 2's head IS chunk 1's tail (exact
-    # samples, non-constant waveform so equality is meaningful).
+    assert c2.end_time == pytest.approx((2 * S + P) * W / 16000, abs=1e-3)
+
+    # THE strong oracle: c2's audio is the literal source slice, i.e.
+    # previous tail | ACTUAL intervening silence | new speech, in true
+    # source order — the waveform makes each region distinguishable.
+    _source_equal(c2, frames)
+    _source_equal(c1, frames)
+
+    # Explicit decomposition on top of the oracle: head IS c1's tail...
     assert np.array_equal(c2.audio[:carry], c1.audio[-carry:])
+    # ...and the samples following the tail are the REAL source-gap
+    # samples (the 480ms between prev_end and the new speech start).
+    gap_start_i = int(round(prev_end * 16000))
+    new_speech_i = int(round(((S + P) * W / 16000) * 16000))
+    assert np.array_equal(
+        c2.audio[carry:new_speech_i - gap_start_i + carry],
+        src[gap_start_i:new_speech_i],
+    )
     assert c1.overlap_from_prev_s == 0.0          # first chunk: nothing carried
-    # The tail really is prior-chunk audio, not zeros/decoration.
-    assert np.any(c1.audio[-carry:] != 0)
+
+
+def test_max_span_enforced_during_retained_silence():
+    # max=1s, min_gap huge (no pause-close): 384ms speech then 1920ms
+    # retained silence — the chunk MUST close at ~1s span while SILENT,
+    # not wait for speech to resume.
+    pattern = [True] * 12 + [False] * 60 + [True] * 6 + [False] * 20
+    frames, vad, _ = _ramp_frames(pattern)
+    seg = RealSegmenter(vad=vad, config=SegmentationConfig(
+        pause_threshold_ms=350, min_chunk_duration_ms=0, overlap_ms=0,
+        min_speech_ms=0, min_gap_ms=10000, max_chunk_duration_s=1.0))
+    chunks = list(seg.process(iter(frames)))
+
+    assert len(chunks) == 2
+    c1, c2 = chunks
+    # The max-span close fired WHILE SILENT (wall span ~1.02s), so c1
+    # emits through last_speech_end (384ms) and the resumed speech opens
+    # a FRESH chunk at its own start. Under the old code (speech-branch
+    # check only) the chunk would have stayed open through all 1.9s of
+    # retained silence and swallowed the resumed speech into c1.
+    assert c1.end_time == pytest.approx(12 * W / 16000, abs=1e-6)
+    assert len(c1.audio) == 12 * W
+    assert c2.start_time == pytest.approx(72 * W / 16000, abs=1e-6)
+    assert c2.overlap_from_prev_s == 0.0            # overlap_ms=0 here
+    for c in chunks:
+        _identity(c)
+        _source_equal(c, frames)
+
+
+def test_long_gap_drops_carry_rather_than_exceeding_max():
+    # overlap 200ms but a 3s gap with max=1s: bridging would exceed the
+    # span ceiling, so the carry is DROPPED — chunk 2 opens fresh with
+    # truthful timestamps and no overlap.
+    S, P = 12, 94  # gap = 94*32ms ≈ 3.0s
+    pattern = [True] * S + [False] * P + [True] * S + [False] * 15
+    frames, vad, _ = _ramp_frames(pattern)
+    seg = RealSegmenter(vad=vad, config=SegmentationConfig(
+        pause_threshold_ms=350, min_chunk_duration_ms=0,
+        overlap_ms=200, min_speech_ms=0, max_chunk_duration_s=1.0))
+    chunks = list(seg.process(iter(frames)))
+
+    assert len(chunks) == 2
+    c1, c2 = chunks
+    assert c2.overlap_from_prev_s == 0.0          # carry dropped
+    assert c2.start_time == pytest.approx((S + P) * W / 16000, abs=1e-3)
+    _source_equal(c1, frames)
+    _source_equal(c2, frames)
 
 
 def test_min_speech_ms_drops_blips():
@@ -139,15 +211,17 @@ def test_min_gap_ms_prevents_split_becomes_internal_silence():
 
     assert len(chunks) == 1                        # no split below the gap
     _identity(chunks[0])
+    _source_equal(chunks[0], frames)
     # All 30 frames' span (speech + 640ms internal silence + speech).
     assert len(chunks[0].audio) == 30 * W
 
     # Control: min_gap below the pause -> two chunks, as before.
+    frames2, _, _ = _ramp_frames(pattern)
     seg2 = RealSegmenter(vad=FakeVad([(0.9, p) for p in pattern]),
                          config=SegmentationConfig(
                              pause_threshold_ms=10, min_chunk_duration_ms=0,
                              overlap_ms=0, min_speech_ms=0, min_gap_ms=10))
-    assert len(list(seg2.process(iter(_ramp_frames(pattern)[0])))) == 2
+    assert len(list(seg2.process(iter(frames2)))) == 2
 
 
 def test_ordering_and_ids_deterministic():
@@ -161,3 +235,4 @@ def test_ordering_and_ids_deterministic():
     assert chunks[0].end_time <= chunks[1].start_time   # time-ordered
     for c in chunks:
         _identity(c)
+        _source_equal(c, frames)

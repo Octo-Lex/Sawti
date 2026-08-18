@@ -1,33 +1,35 @@
 """Real segmenter implementing the close-decision policy (spec §2.4) —
-Commit 4: wall-clock-true chunk semantics.
+Commit 4 corrective pass: source-time-true chunk semantics.
 
-Contract (invariant-tested):
+STRONG invariant: every emitted chunk's audio is the LITERAL source
+waveform for [start_time, end_time] — assertable as
+``np.array_equal(chunk.audio, source[int(start*sr):int(end*sr)])``.
 
-- ``AudioChunk.audio`` and ``[start_time, end_time]`` describe the SAME
-  audio interval: sample counts are derived from the same offsets as the
-  timestamps, so ``len(audio) == (end_time - start_time) * sample_rate``
-  exactly. VAD decides boundaries; it NEVER destructively edits the
-  waveform — internal silence inside an open chunk is preserved in the
-  emitted audio. The pause-threshold silence that triggers a close is
-  lookahead (consumed, not emitted): chunks span first-speech-start ..
-  last-speech-end.
-- ``sample_rate`` propagates from the input frames.
-- ``overlap_ms``: the chunk AFTER an emitted one physically begins with
-  that chunk's tail audio (``overlap_from_prev_s`` = seconds actually
-  carried; a shorter previous chunk carries less). Note the splice
-  semantics: the leading overlap re-covers the prior chunk's closing
-  words for downstream dedup — the chunk's OWN span (excluding overlap)
-  remains strictly wall-clock-true.
-- ``min_speech_ms``: total SPEECH content required for any emission —
-  sub-threshold blips are dropped even when min_chunk_duration_ms is 0.
-- ``min_gap_ms``: inter-chunk silence must reach this before a
-  pause-close may split; silence shorter than this stays internal to the
-  open chunk (observable when configured above pause_threshold_ms).
-- Close policy (spec §2.4): pause-close requires silence >=
-  pause_threshold_ms AND silence >= min_gap_ms AND span >=
-  min_chunk_duration_ms; force-close fires at max_chunk_duration_s
-  mid-speech; EOF flushes the open chunk. Emission always additionally
-  requires speech >= min_speech_ms. Ordering/ids deterministic.
+- An open chunk buffers the contiguous wall-clock stream; VAD decides
+  boundaries and never destructively edits audio. Internal silence is
+  retained; the pause-threshold silence is lookahead (consumed, not
+  emitted). Emitted span: first-speech-start .. last-speech-end.
+- Overlap carries the previous EMITTED chunk's tail ACROSS the real gap:
+  the next chunk's audio is tail | actual intervening silence | new
+  speech, and its start_time is the tail's true source time.
+  ``overlap_from_prev_s`` counts ONLY the duplicated tail, never the
+  bridge silence. Carry budget: if carried + gap would exceed
+  max_chunk_duration_s, the carry is DROPPED (fresh open at speech
+  start) — overlap must never force a chunk beyond max span, and a
+  dropped carry beats falsified timestamps.
+- max_chunk_duration_s is enforced on the full wall-clock span INCLUDING
+  retained silence: a max-span close fires while the current window is
+  silent, not only on speech.
+- sample_rate propagates from input frames.
+- min_speech_ms gates every emission on total SPEECH content (the tail's
+  speech belongs to the previous chunk and does not count).
+- min_gap_ms: inter-chunk silence must reach it before a pause-close may
+  split; shorter silence stays internal.
+- Close policy: pause-close requires silence >= pause_threshold_ms AND
+  silence >= min_gap_ms AND speech-span >= min_chunk_duration_ms;
+  max-span close (speech or silent window) at max_chunk_duration_s; EOF
+  flush. Discarded blips merge their buffered audio into the gap stream
+  so bridge accounting stays source-exact. Ordering/ids deterministic.
 """
 from __future__ import annotations
 
@@ -57,60 +59,87 @@ class RealSegmenter:
         cfg = self.config
         sr: int | None = None
         window = 512  # Silero contract: 512 @ 16 kHz, 256 @ 8 kHz
-        pending_tail: np.ndarray | None = None  # overlap carry for next open
 
+        # Overlap-carry machinery (between emitted chunks).
+        pending_tail: np.ndarray | None = None   # prev chunk's tail samples
+        prev_end: float | None = None            # prev chunk's end_time
+        gap_parts: list[np.ndarray] = []         # source samples since prev_end
+        gap_samples = 0
+
+        # Open-chunk state.
         opened = False
-        own_start = 0.0            # wall-clock first-speech start
+        timeline_start = 0.0      # true source start of the chunk's audio
+        overlap_s = 0.0           # duplicated previous-tail seconds (this chunk)
+        own_start = 0.0           # first-speech start (content gates)
         last_speech_end = 0.0
-        parts: list[np.ndarray] = []   # contiguous wall-clock since open
-        buffered = 0                # samples buffered since open (position)
-        speech_end_pos = 0          # buffer position of last speech END
-        speech_samples = 0          # total speech samples (min_speech gate)
+        parts: list[np.ndarray] = []
+        buffered = 0              # samples buffered since timeline_start
+        speech_end_pos = 0        # buffer position of last speech END
+        speech_samples = 0        # total speech samples (min_speech gate)
         silence_ms = 0.0
 
-        def reset() -> None:
+        def _merge_into_gap() -> None:
+            """A discarded chunk's buffered audio is intervening SOURCE
+            audio — merge it so bridge accounting stays exact."""
+            nonlocal gap_parts, gap_samples
+            if parts:
+                gap_parts.append(np.concatenate(parts))
+                gap_samples += buffered
+
+        def _drop_carry_if_over_budget() -> None:
+            nonlocal pending_tail, gap_parts, gap_samples
+            if pending_tail is not None and (
+                len(pending_tail) + gap_samples
+            ) / sr > cfg.max_chunk_duration_s:
+                pending_tail = None
+                gap_parts = []
+                gap_samples = 0
+
+        def reset_open() -> None:
             nonlocal opened, parts, buffered, speech_end_pos
-            nonlocal speech_samples, silence_ms
+            nonlocal speech_samples, silence_ms, overlap_s
             opened = False
             parts = []
             buffered = 0
             speech_end_pos = 0
             speech_samples = 0
             silence_ms = 0.0
+            overlap_s = 0.0
 
         def emit(emit_end: float) -> AudioChunk | None:
-            """Build the chunk [own_start, emit_end]; None if gates fail.
-            On success, stage this chunk's tail as the next overlap carry."""
-            nonlocal pending_tail
-            speech_ms = speech_samples / sr * 1000.0
-            if speech_ms < cfg.min_speech_ms:
-                return None  # blip: dropped, pending_tail untouched
-            own_audio = (
-                np.concatenate(parts)[:speech_end_pos]
-                if parts else np.zeros(0, dtype=np.float32)
-            )
-            tail = None
-            if cfg.overlap_ms > 0 and len(own_audio) > 0:
-                carry = min(int(cfg.overlap_ms / 1000.0 * sr), len(own_audio))
-                if carry > 0:
-                    tail = own_audio[-carry:].copy()
-            audio = (
-                np.concatenate([pending_tail, own_audio])
-                if pending_tail is not None and len(pending_tail) > 0
-                else own_audio
-            )
-            overlap_s = (len(pending_tail) / sr) if pending_tail is not None else 0.0
+            """Build the chunk [timeline_start, emit_end]; None if gates
+            fail (blip — buffered audio merges into the gap stream)."""
+            nonlocal pending_tail, prev_end, gap_parts, gap_samples
+            if speech_samples / sr * 1000.0 < cfg.min_speech_ms:
+                _merge_into_gap()
+                _drop_carry_if_over_budget()
+                reset_open()
+                return None
+            full = np.concatenate(parts) if parts else np.zeros(0, np.float32)
+            own_audio = full[:speech_end_pos]
+            residue = full[speech_end_pos:]  # lookahead after last speech
             chunk = AudioChunk(
                 id=f"c{self._counter}",
-                audio=np.ascontiguousarray(audio, dtype=np.float32),
+                audio=np.ascontiguousarray(own_audio, dtype=np.float32),
                 sample_rate=sr,
-                start_time=own_start - overlap_s,
+                start_time=timeline_start,
                 end_time=emit_end,
                 overlap_from_prev_s=overlap_s,
                 meta={},
             )
             self._counter += 1
-            pending_tail = tail
+            # Stage the tail for the next chunk; seed the gap stream with
+            # the residue (source samples immediately after emit_end).
+            if cfg.overlap_ms > 0 and len(own_audio) > 0:
+                carry = min(int(cfg.overlap_ms / 1000.0 * sr), len(own_audio))
+                pending_tail = own_audio[-carry:].copy() if carry > 0 else None
+            else:
+                pending_tail = None
+            prev_end = emit_end
+            gap_parts = [residue] if len(residue) else []
+            gap_samples = len(residue)
+            _drop_carry_if_over_budget()
+            reset_open()
             return chunk
 
         for frame in frames:
@@ -134,36 +163,66 @@ class RealSegmenter:
                 vr = self.vad.prob(sub, sr)
                 if vr.is_speech:
                     if not opened:
+                        # Open, optionally carrying the previous tail across
+                        # the REAL bridged gap (tail | gap | this speech).
+                        if pending_tail is not None:
+                            bridge = (
+                                np.concatenate(gap_parts)
+                                if gap_parts else np.zeros(0, np.float32)
+                            )
+                            parts = [pending_tail, bridge]
+                            buffered = len(pending_tail) + gap_samples
+                            timeline_start = prev_end - len(pending_tail) / sr
+                            overlap_s = len(pending_tail) / sr
+                        else:
+                            parts = []
+                            buffered = 0
+                            timeline_start = sub_start
+                            overlap_s = 0.0
+                        pending_tail = None
+                        gap_parts = []
+                        gap_samples = 0
                         opened = True
                         own_start = sub_start
-                        parts = []
-                        buffered = 0
+                        last_speech_end = sub_start
                         speech_end_pos = 0
                         speech_samples = 0
                         silence_ms = 0.0
-                        # pending_tail (overlap carry) deliberately survives
-                        # opens/closes — it belongs to the next EMITTED chunk.
                     parts.append(sub[: b - a] if b - a < window else sub)
                     buffered += b - a
-                    speech_end_pos = buffered       # buffer POSITION, not a
-                    speech_samples += b - a         # speech-sample count
+                    speech_end_pos = buffered
+                    speech_samples += b - a
                     last_speech_end = sub_end
                     silence_ms = 0.0
 
-                    span_ms = (sub_end - own_start) * 1000.0
+                    span_ms = (sub_end - timeline_start) * 1000.0
                     if span_ms >= cfg.max_chunk_duration_s * 1000.0:
-                        if (sub_end - own_start) * 1000.0 >= cfg.min_chunk_duration_ms:
+                        if (last_speech_end - own_start) * 1000.0 >= cfg.min_chunk_duration_ms:
                             chunk = emit(sub_end)
                             if chunk is not None:
                                 yield chunk
-                        reset()
+                        else:
+                            _merge_into_gap()
+                            _drop_carry_if_over_budget()
+                            reset_open()
                 else:
                     if opened:
                         parts.append(sub[: b - a] if b - a < window else sub)
                         buffered += b - a
                         silence_ms += sub_ms
+                        span_ms = (sub_end - timeline_start) * 1000.0
                         content_ms = (last_speech_end - own_start) * 1000.0
-                        if (
+                        if span_ms >= cfg.max_chunk_duration_s * 1000.0:
+                            # Max span enforced during retained silence too.
+                            if content_ms >= cfg.min_chunk_duration_ms:
+                                chunk = emit(last_speech_end)
+                                if chunk is not None:
+                                    yield chunk
+                            else:
+                                _merge_into_gap()
+                                _drop_carry_if_over_budget()
+                                reset_open()
+                        elif (
                             silence_ms >= cfg.pause_threshold_ms
                             and silence_ms >= cfg.min_gap_ms
                             and content_ms >= cfg.min_chunk_duration_ms
@@ -171,12 +230,21 @@ class RealSegmenter:
                             chunk = emit(last_speech_end)
                             if chunk is not None:
                                 yield chunk
-                            reset()
+                    elif pending_tail is not None:
+                        # Gap growing between chunks: buffer the source
+                        # silence while a carry remains budgeted.
+                        gap_parts.append(
+                            sub[: b - a] if b - a < window else sub
+                        )
+                        gap_samples += b - a
+                        _drop_carry_if_over_budget()
 
         if opened:
-            content_ms = (last_speech_end - own_start) * 1000.0
-            if content_ms >= cfg.min_chunk_duration_ms:
+            if (last_speech_end - own_start) * 1000.0 >= cfg.min_chunk_duration_ms:
                 chunk = emit(last_speech_end)
                 if chunk is not None:
                     yield chunk
-            reset()
+            else:
+                _merge_into_gap()
+                _drop_carry_if_over_budget()
+                reset_open()
