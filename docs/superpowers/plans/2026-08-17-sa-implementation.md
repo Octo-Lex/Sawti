@@ -1026,23 +1026,40 @@ if __name__ == "__main__":
 
 Not a subagent task (hours–days of GPU). Runbook:
 
-- [ ] Confirm `data/sada_training/train/manifest.jsonl` exists (Task 2 Step 5).
+- [ ] Confirm `data/sada_training/train/manifest_core.jsonl` exists
+  (the CORE view — Najdi/Hijazi/Khaliji only, 152,821 rows; if absent,
+  run `carve_manifests` per Task 2. main() refuses the full manifest).
+- [ ] Confirm `data/sada_training/val/manifest.jsonl` exists
+  (the VALIDATION split — 3,423 clips; NEVER `data/sada_spike`, which
+  is test-derived and locked as a frozen baseline reference only).
 - [ ] Launch in a detached terminal:
   ```bash
-  uv run python -m sawti.training.train_qlora \
-    --train data/sada_training/train --dev data/sada_spike \
-    --out checkpoints/sa_qlora --flavor <qlora|lora per Task 0>
+  uv run python -m sawti.training.train_qlora \\
+    --train data/sada_training/train \\
+    --dev data/sada_training/val \\
+    --out checkpoints/sa_qlora \\
+    --flavor qlora
   ```
-- [ ] Monitor `checkpoints/sa_qlora/dev_log.jsonl` — every 500 steps: dev WER,
-  best marker, regression counter. Expected shape: WER falls from ~43 toward
-  20s–30s within the first few k steps; loop-rate falls with it.
-- [ ] Stop conditions (automatic): 3 consecutive dev regressions, or max_steps.
-- [ ] Identify best checkpoint: the `eval_index` with `is_best: true` and the
-  lowest `best_wer`; map to `checkpoint-<500*eval_index>`.
+- [ ] Monitor `checkpoints/sa_qlora/dev_log.jsonl` — every 500 steps,
+  watch these fields (the balanced selection regime):
+  - `selection_score`: the unweighted three-dialect mean (ranking metric)
+  - `eligible`: loop <= 5% AND all guards pass
+  - `guard_fail`: any dialect exceeding baseline + 3pp
+  - `loop_pct`: hallucination rate (eligibility constraint)
+  - `best_selection_score`: the standing best among eligible checkpoints
+  Reference: zero-shot validation baselines are Najdi 46.69 / Hijazi
+  49.93 / Khaliji 56.40 (clean macro WER); the selection_score baseline
+  (mean of three) is ~51.0.
+- [ ] Stop conditions (automatic): 3 consecutive non-improving evals,
+  or max_steps (10000).
+- [ ] Identify the selected checkpoint: the `eval_index` whose record
+  has `is_best: true` with the lowest `best_selection_score` among
+  ELIGIBLE evaluations; map to `checkpoint-<500*eval_index>`.
 - [ ] Export: `uv run python -m sawti.training.export_merge --adapter
   checkpoints/sa_qlora/checkpoint-<N> --out models/sa_merged`.
-- [ ] Record the run (flavor, steps reached, best WER, VRAM) in the research
-  report addendum. **If OOM:** drop per-device batch by half, double accum
+- [ ] Record the run (flavor, steps reached, best selection_score,
+  per-dialect final metrics, VRAM) in the research report addendum.
+  **If OOM:** drop per-device batch by half, double accum
   (edit Task 4 constants), restart — do not change the LoRA recipe.
 
 ---
