@@ -114,3 +114,41 @@ def test_assert_no_overlap_detects_leakage(tmp_path):
     mk(b, ["h3", "h4"])                            # disjoint now
     assert_no_overlap(a, b)
     assert manifest_audio_hashes(a) == {"h1", "h2"}
+
+
+def test_carve_manifests_deterministic_views(tmp_path):
+    import json as _j
+    from pathlib import Path as _P
+
+    from sawti.training.data_prep import (carve_manifests,
+                                          manifest_audio_hashes)
+    rows = [
+        {"clip_id": "a", "dialect": "Najdi", "audio_sha256": "h1"},
+        {"clip_id": "b", "dialect": "Shamali", "audio_sha256": "h2"},
+        {"clip_id": "c", "dialect": "Hijazi", "audio_sha256": "h3"},
+        {"clip_id": "d", "dialect": "Janubi", "audio_sha256": "h4"},
+        {"clip_id": "e", "dialect": "Khaliji", "audio_sha256": "h5"},
+    ]
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "manifest.jsonl").write_text(
+        "\n".join(_j.dumps(r, ensure_ascii=False) for r in rows),
+        encoding="utf-8")
+
+    stats = carve_manifests(src, tmp_path / "views", ["Shamali", "Janubi"])
+    assert stats == {"source_rows": 5, "core_rows": 3, "carved_rows": 2,
+                     "carved_labels": ["Janubi", "Shamali"]}
+
+    core = [_j.loads(l) for l in (tmp_path / "views" / "manifest_core.jsonl")
+            .read_text(encoding="utf-8").splitlines()]
+    diag = [_j.loads(l) for l in
+            (tmp_path / "views" / "manifest_diagnostic.jsonl")
+            .read_text(encoding="utf-8").splitlines()]
+    assert {r["dialect"] for r in core} == {"Najdi", "Hijazi", "Khaliji"}
+    assert {r["dialect"] for r in diag} == {"Shamali", "Janubi"}
+    # Views reference the SAME hashes — nothing was duplicated or lost.
+    assert manifest_audio_hashes(src) == (
+        manifest_audio_hashes(tmp_path / "views",
+                              "manifest_core.jsonl") |
+        manifest_audio_hashes(tmp_path / "views",
+                              "manifest_diagnostic.jsonl"))

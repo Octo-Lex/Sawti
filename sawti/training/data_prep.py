@@ -168,10 +168,41 @@ def materialize(split: str, out: str, extra_labels: list[str],
     return stats
 
 
-def manifest_audio_hashes(data_dir: str | Path) -> set[str]:
+def carve_manifests(source_dir: str | Path, out_dir: str | Path,
+                    labels_to_carve: list[str],
+                    source_name: str = "manifest.jsonl",
+                    core_name: str = "manifest_core.jsonl",
+                    carved_name: str = "manifest_diagnostic.jsonl") -> dict:
+    """Deterministically split a materialized manifest into VIEWS by label.
+
+    The source-faithful manifest is NOT mutated: this writes two new
+    manifest files in out_dir referencing the SAME WAVs (paths resolved
+    against source_dir). The core view EXCLUDES the carved labels; the
+    diagnostic view contains ONLY them. This is a manifest-selection
+    seam, not dialect policy — the caller decides which labels to carve.
+    """
+    src = Path(source_dir)
+    rows = [json.loads(l) for l in (src / source_name).read_text(
+        encoding="utf-8").splitlines()]
+    carve = set(labels_to_carve)
+    core, diag = [], []
+    for r in rows:
+        (diag if r.get("dialect") in carve else core).append(r)
+    out_p = Path(out_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    for name, rows_ in ((core_name, core), (carved_name, diag)):
+        (out_p / name).write_text(
+            chr(10).join(json.dumps(r, ensure_ascii=False) for r in rows_),
+            encoding="utf-8")
+    return {"source_rows": len(rows), "core_rows": len(core),
+            "carved_rows": len(diag), "carved_labels": sorted(carve)}
+
+
+def manifest_audio_hashes(data_dir: str | Path,
+                          manifest_name: str = "manifest.jsonl") -> set[str]:
     """All audio_sha256 values in a materialized manifest."""
     hashes = set()
-    for line in (Path(data_dir) / "manifest.jsonl").read_text(
+    for line in (Path(data_dir) / manifest_name).read_text(
             encoding="utf-8").splitlines():
         hashes.add(json.loads(line)["audio_sha256"])
     return hashes
