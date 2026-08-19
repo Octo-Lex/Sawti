@@ -202,3 +202,15 @@ def test_set_epoch_callback_advances_dataset_stream():
         d1 = SadaDataset(p, augment_enabled=True, seed=42, epoch=1)
         assert not np.array_equal(d0[0]["audio"], d1[0]["audio"])
         assert np.array_equal(d0[0]["audio"], d0[0]["audio"])  # stable
+
+
+def test_validation_baselines_pinned():
+    """The selection baselines come from the stock model's zero-shot run
+    on the MATERIALIZED VALIDATION set — pinned in code so training
+    configs reference stable numbers (the full JSON stays a local
+    operator artifact under gitignored data/)."""
+    from sawti.training.baselines import VALIDATION_BASELINES
+
+    assert set(VALIDATION_BASELINES) == {"Najdi", "Hijazi", "Khaliji"}
+    for v in VALIDATION_BASELINES.values():
+        assert 0.0 < v < 100.0
