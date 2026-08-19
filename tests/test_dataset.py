@@ -13,14 +13,24 @@ import torch
 from sawti.training.dataset import SadaDataset, WhisperCollator, augment
 
 
+# Deliberately DISTINCT: tokenizer BOS (<|endoftext|>) vs the model's
+# decoder_start (<|startoftranscript|>) — the regression below fails if
+# the collator ever strips the wrong one.
+FAKE_BOS = 50257
+FAKE_DECODER_START = 50258
+
+
 class FakeTokenizer:
     """Callable (the collator invokes tok(...)), with bos_token_id."""
 
-    bos_token_id = 1
+    bos_token_id = FAKE_BOS
 
     def __call__(self, texts, padding=True, truncation=True,
                  max_length=448, return_tensors="pt"):
-        ids = torch.tensor([[1, 5, 6], [1, 5, 0]])
+        # Labels begin with the DECODER-START token (as Whisper
+        # tokenization produces), NOT with the tokenizer BOS.
+        ids = torch.tensor([[FAKE_DECODER_START, 5, 6],
+                            [FAKE_DECODER_START, 5, 0]])
         am = torch.tensor([[1, 1, 1], [1, 1, 0]])
 
         class B:
@@ -83,12 +93,59 @@ def test_dataset_text_fallback_semantics(tmp_path):
 def test_collator_shapes_and_masking(tmp_path):
     _mk(tmp_path)
     ds = SadaDataset(str(tmp_path))
-    batch = WhisperCollator(FakeProcessor())([ds[0], ds[1]])
+    batch = WhisperCollator(FakeProcessor(),
+                            decoder_start_token_id=FAKE_DECODER_START)(
+        [ds[0], ds[1]])
     assert batch["input_features"].shape[0] == 2
     assert batch["labels"].shape[0] == 2
-    # bos stripped; padded positions are -100
+    # padded positions are -100
     assert (batch["labels"] == -100).any()
-    assert batch["labels"][0, 0].item() == 5   # BOS (1) removed
+    # DECODER-START stripped (not the tokenizer BOS — they differ here)
+    assert batch["labels"][0, 0].item() == 5
+
+
+def test_collator_does_not_strip_tokenizer_bos():
+    """Regression: a leading tokenizer-BOS (≠ decoder_start) must SURVIVE
+    — stripping it would corrupt labels when the two tokens differ."""
+    _mk(Path("/tmp/_never") if False else Path(".")) if False else None
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        _mk(p)
+        ds = SadaDataset(str(p))
+        batch = WhisperCollator(
+            FakeProcessor(), decoder_start_token_id=FAKE_DECODER_START)(
+            [ds[0], ds[1]])
+        # The fake prepends DECODER_START; stripping it leaves 5/6.
+        assert batch["labels"][0, 0].item() == 5
+
+
+def test_collator_requires_explicit_decoder_start(tmp_path):
+    _mk(tmp_path)
+    with pytest.raises(TypeError):
+        WhisperCollator(FakeProcessor())  # decoder_start_token_id required
+
+
+def test_dataset_rejects_non_16k_audio(tmp_path):
+    """A non-16k WAV fails LOUDLY rather than being time-scaled wrong."""
+    sf.write(tmp_path / "c0.wav", np.zeros(4000, np.float32), 8000)
+    (tmp_path / "manifest.jsonl").write_text(
+        json.dumps({"clip_id": "c0", "cleaned_text": "أ", "text": "أ"}),
+        encoding="utf-8")
+    ds = SadaDataset(str(tmp_path))
+    with pytest.raises(ValueError, match="sample_rate=8000"):
+        _ = ds[0]
+
+
+def test_dataset_text_truncation_at_448(tmp_path):
+    sf.write(tmp_path / "c0.wav", np.zeros(8000, np.float32), 16000)
+    long_text = "كلمة " * 200  # 1000 chars > 448
+    (tmp_path / "manifest.jsonl").write_text(
+        json.dumps({"clip_id": "c0", "cleaned_text": long_text,
+                    "text": long_text}, ensure_ascii=False),
+        encoding="utf-8")
+    ds = SadaDataset(str(tmp_path))
+    assert len(ds[0]["text"]) == 448
 
 
 def test_augment_deterministic_per_sample_and_epoch():

@@ -58,9 +58,19 @@ class SadaDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.rows)
 
+    EXPECTED_SR = 16000  # Whisper's feature extractor contract
+
     def __getitem__(self, i: int) -> dict:
         r = self.rows[i]
         audio, sr = sf.read(self.dir / f"{r['clip_id']}.wav", dtype="float32")
+        if sr != self.EXPECTED_SR:
+            # Materialization preserved each source file's ORIGINAL rate;
+            # a non-16k file processed as 16k would be time-scaled wrong
+            # with no error. Fail loudly rather than corrupt training.
+            raise ValueError(
+                f"{r['clip_id']}.wav sample_rate={sr}; expected "
+                f"{self.EXPECTED_SR} — rematerialize or resample the corpus "
+                f"explicitly (see data_prep)")
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
         if self.augment_enabled:
@@ -76,11 +86,17 @@ class SadaDataset(torch.utils.data.Dataset):
 
 class WhisperCollator:
     """Standard Whisper fine-tuning collator: 30s-padded features + masked
-    labels. The tokenizer is invoked as a callable; BOS is stripped from
-    labels; padded positions are -100."""
+    labels. The tokenizer is invoked as a callable; the DECODER-START
+    token (<|startoftranscript|>, model.config.decoder_start_token_id —
+    DISTINCT from the tokenizer BOS <|endoftext|>) is stripped from
+    labels when the tokenizer prepended it; padded positions are -100.
 
-    def __init__(self, processor) -> None:
+    decoder_start_token_id MUST be supplied explicitly (Whisper training
+    shifts labels by the model's decoder start, not the tokenizer BOS)."""
+
+    def __init__(self, processor, decoder_start_token_id: int) -> None:
         self.processor = processor
+        self.decoder_start_token_id = decoder_start_token_id
 
     def __call__(self, features: list[dict]) -> dict:
         inputs = self.processor(
@@ -97,7 +113,11 @@ class WhisperCollator:
         attention_mask = batch["attention_mask"] if isinstance(
             batch, dict) else batch.attention_mask
         labels = input_ids.masked_fill(attention_mask.ne(1), -100)
-        if (labels[:, 0] == tok.bos_token_id).all().cpu().item():
+        # Strip the DECODER-START token when uniformly prepended — NOT the
+        # tokenizer BOS (they differ in Whisper: BOS=<|endoftext|>,
+        # decoder_start=<|startoftranscript|>). The model re-adds
+        # decoder_start internally during label shifting.
+        if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
             labels = labels[:, 1:]
         out = dict(input_features=inputs.input_features)
         if hasattr(inputs, "attention_mask"):
