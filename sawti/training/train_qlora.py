@@ -139,7 +139,7 @@ def compute_selection(result: dict, baselines: dict,
             "guard_fail": guard_fail, "loop_ok": loop_ok}
 
 
-class DevEvalCallback:
+class DevEvalCallback(TrainerCallback):
     """Evaluates on the VALIDATION dev set at each save point.
 
     Selection regime (locked): eligibility requires loop-rate <= limit
