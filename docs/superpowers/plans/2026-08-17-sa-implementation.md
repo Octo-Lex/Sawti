@@ -880,6 +880,9 @@ def main() -> None:
     model.config.suppress_tokens = []
     model = get_peft_model(model, build_lora_config())
     model.print_trainable_parameters()
+    # WhisperCollator REQUIRES the decoder-start token id — sourced from
+    # the model config (NOT the tokenizer BOS; they differ in Whisper).
+    decoder_start_token_id = model.config.decoder_start_token_id
 
     processor = WhisperProcessor.from_pretrained(a.base)
     train_ds = SadaDataset(a.train, augment_enabled=True, seed=42)
@@ -898,7 +901,8 @@ def main() -> None:
 
     trainer = Trainer(
         model=model, args=targs, train_dataset=train_ds,
-        data_collator=WhisperCollator(processor),
+        data_collator=WhisperCollator(
+            processor, decoder_start_token_id=decoder_start_token_id),
         callbacks=[
             SetEpochCallback(train_ds),
             DevEvalCallback(dev_eval_fn, str(Path(a.out) / "dev_log.jsonl")),

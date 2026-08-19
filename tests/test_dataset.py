@@ -106,18 +106,38 @@ def test_collator_shapes_and_masking(tmp_path):
 
 def test_collator_does_not_strip_tokenizer_bos():
     """Regression: a leading tokenizer-BOS (≠ decoder_start) must SURVIVE
-    — stripping it would corrupt labels when the two tokens differ."""
-    _mk(Path("/tmp/_never") if False else Path(".")) if False else None
+    — stripping it would corrupt labels when the two tokens differ.
+    Uses a tokenizer whose output BEGINS WITH FAKE_BOS while the
+    collator is constructed with decoder_start_token_id=FAKE_DECODER_START
+    (the two are deliberately distinct)."""
     import tempfile
+
+    class BosFirstTokenizer(FakeTokenizer):
+        def __call__(self, texts, padding=True, truncation=True,
+                     max_length=448, return_tensors="pt"):
+            ids = torch.tensor([[FAKE_BOS, 5, 6],
+                                [FAKE_BOS, 5, 0]])
+            am = torch.tensor([[1, 1, 1], [1, 1, 0]])
+
+            class B:
+                input_ids = ids
+                attention_mask = am
+            return B()
+
+    class BosFirstProcessor(FakeProcessor):
+        tokenizer = BosFirstTokenizer()
+
     with tempfile.TemporaryDirectory() as td:
         p = Path(td)
         _mk(p)
         ds = SadaDataset(str(p))
         batch = WhisperCollator(
-            FakeProcessor(), decoder_start_token_id=FAKE_DECODER_START)(
+            BosFirstProcessor(),
+            decoder_start_token_id=FAKE_DECODER_START)(
             [ds[0], ds[1]])
-        # The fake prepends DECODER_START; stripping it leaves 5/6.
-        assert batch["labels"][0, 0].item() == 5
+        # The leading tokenizer BOS survived intact.
+        assert batch["labels"][0, 0].item() == FAKE_BOS
+        assert batch["labels"][1, 0].item() == FAKE_BOS
 
 
 def test_collator_requires_explicit_decoder_start(tmp_path):
