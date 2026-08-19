@@ -40,11 +40,18 @@ def augment(audio: np.ndarray, rng: np.random.Generator) -> np.ndarray:
 class SadaDataset(torch.utils.data.Dataset):
     def __init__(self, data_dir: str | Path, max_text_len: int = 448,
                  augment_enabled: bool = False, seed: int = 0,
-                 epoch: int = 0) -> None:
+                 epoch: int = 0,
+                 manifest_name: str = "manifest.jsonl") -> None:
         self.dir = Path(data_dir)
+        # Manifest-selection SEAM (not dialect policy): the caller names
+        # which view to train/evaluate on (manifest.jsonl, manifest_core,
+        # manifest_diagnostic...). Missing manifest = caller error.
+        manifest_path = self.dir / manifest_name
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"manifest not found: {manifest_path}")
         self.rows = [
             json.loads(line)
-            for line in (self.dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+            for line in manifest_path.read_text(encoding="utf-8").splitlines()
         ]
         self.max_text_len = max_text_len
         self.augment_enabled = augment_enabled

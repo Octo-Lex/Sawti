@@ -107,6 +107,16 @@ def compute_selection(result: dict, baselines: dict,
     materialized validation set — never from the test-derived spike."""
     import math
 
+    # FAIL CLOSED: every core dialect MUST have a baseline. An empty or
+    # partial baseline map silently disabling the regression guards is a
+    # wiring bug, not a valid configuration.
+    missing = [d for d in CORE_DIALECTS if d not in baselines]
+    if missing:
+        raise ValueError(
+            f"compute_selection: missing baselines for {missing}; "
+            f"import sawti.training.baselines.VALIDATION_BASELINES "
+            f"(all three core dialects required)"
+        )
     loop_ok = result["loop_pct"] <= loop_limit_pct
     guard_fail = []
     dialect_wers = []
@@ -117,7 +127,7 @@ def compute_selection(result: dict, baselines: dict,
             guard_fail.append({"dialect": d, "reason": "missing_or_nonfinite"})
             continue
         dialect_wers.append(wer)
-        if d in baselines and wer > baselines[d] + dialect_tolerance_pp:
+        if wer > baselines[d] + dialect_tolerance_pp:
             guard_fail.append({"dialect": d, "wer": wer,
                                "baseline": baselines[d],
                                "exceeds_by_pp": wer - baselines[d]})
@@ -209,6 +219,7 @@ def main() -> None:
 
     from sawti.env import load_env
     load_env(override=True)  # operator entry edge (see env.py policy)
+    from sawti.training.baselines import VALIDATION_BASELINES
     from sawti.training.dataset import SadaDataset, WhisperCollator
 
     p = argparse.ArgumentParser()
@@ -252,7 +263,18 @@ def main() -> None:
     model.generation_config.task = "transcribe"
     model.generation_config.forced_decoder_ids = None
 
-    train_ds = SadaDataset(a.train, augment_enabled=True, seed=42)
+    # Training reads the CORE manifest view (Najdi/Hijazi/Khaliji only).
+    # Shamali/Janubi live in the diagnostic view and are NEVER seen
+    # during optimization or checkpoint selection. Missing core view =
+    # wiring error -> fail loudly, never fall back to full manifest.
+    core_manifest = Path(a.train) / "manifest_core.jsonl"
+    if not core_manifest.exists():
+        raise FileNotFoundError(
+            f"{core_manifest} not found — run "
+            f"sawti.training.data_prep.carve_manifests first; refusing "
+            f"to silently train on the full (uncarved) manifest")
+    train_ds = SadaDataset(a.train, augment_enabled=True, seed=42,
+                           manifest_name="manifest_core.jsonl")
     targs = build_training_args(a.out, flavor=a.flavor,
                                 max_steps=a.max_steps)
 
@@ -281,7 +303,8 @@ def main() -> None:
             SetEpochCallback(train_ds),
             DevEvalCallback(dev_eval_fn,
                             str(Path(a.out) / "dev_log.jsonl"),
-                            loop_limit_pct=a.loop_limit_pct),
+                            loop_limit_pct=a.loop_limit_pct,
+                            baselines=VALIDATION_BASELINES),
         ],
     )
     trainer.train()

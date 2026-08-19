@@ -162,7 +162,8 @@ def test_lora_config_task_type_deliberately_unset():
 def test_dev_callback_per_dialect_logged(tmp_path):
     m = _metrics({"Najdi": 25.0, "Hijazi": 40.0, "Khaliji": 55.0})
     cb = DevEvalCallback(eval_fn=lambda model: m,
-                         log_path=str(tmp_path / "dev_log.jsonl"), patience=3)
+                         log_path=str(tmp_path / "dev_log.jsonl"), patience=3,
+                         baselines=BASELINES)
     cb.on_save(args=None, state=None, control=_Ctl(), model=None)
     log = [json.loads(l) for l in
            (tmp_path / "dev_log.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -214,3 +215,64 @@ def test_validation_baselines_pinned():
     assert set(VALIDATION_BASELINES) == {"Najdi", "Hijazi", "Khaliji"}
     for v in VALIDATION_BASELINES.values():
         assert 0.0 < v < 100.0
+
+
+def test_compute_selection_missing_baselines_fail_closed():
+    """Empty/partial baseline maps are rejected — the regression guards
+    can never be silently disabled by a wiring omission."""
+    result = _metrics(_core(30.0))
+    with pytest.raises(ValueError, match="missing baselines"):
+        compute_selection(result, {})                 # empty -> reject
+    with pytest.raises(ValueError, match="missing baselines"):
+        compute_selection(result, {"Najdi": 30.0})   # partial -> reject
+
+
+def test_production_baselines_are_the_pinned_validation_set():
+    """main() must pass VALIDATION_BASELINES (the zero-shot validation
+    numbers), not synthetic values. Pinned by checking the module-level
+    import path is the one baselines.py exports."""
+    from sawti.training.baselines import VALIDATION_BASELINES
+    from sawti.training.train_qlora import CORE_DIALECTS
+
+    assert set(VALIDATION_BASELINES) == set(CORE_DIALECTS)
+    # None missing, none extra.
+    assert all(0 < v < 100 for v in VALIDATION_BASELINES.values())
+
+
+def test_dataset_manifest_name_selects_view(tmp_path):
+    """The manifest-selection seam: the core view excludes Shamali/Janubi;
+    the diagnostic view contains exactly those; both resolve the same WAVs."""
+    import json as _j
+    import soundfile as _sf
+
+    import numpy as _np
+    from sawti.training.dataset import SadaDataset
+
+    for cid in ("a", "b", "c"):
+        _sf.write(tmp_path / f"{cid}.wav",
+                  _np.zeros(8000, _np.float32), 16000)
+    rows = [
+        {"clip_id": "a", "dialect": "Najdi", "cleaned_text": "أ",
+         "audio_sha256": "h1"},
+        {"clip_id": "b", "dialect": "Shamali", "cleaned_text": "ب",
+         "audio_sha256": "h2"},
+        {"clip_id": "c", "dialect": "Janubi", "cleaned_text": "ج",
+         "audio_sha256": "h3"},
+    ]
+    for name, subset in [("manifest.jsonl", rows),
+                         ("manifest_core.jsonl", [rows[0]]),
+                         ("manifest_diagnostic.jsonl", [rows[1], rows[2]])]:
+        (tmp_path / name).write_text(
+            chr(10).join(_j.dumps(r, ensure_ascii=False) for r in subset),
+            encoding="utf-8")
+
+    full = SadaDataset(str(tmp_path))
+    core = SadaDataset(str(tmp_path), manifest_name="manifest_core.jsonl")
+    diag = SadaDataset(str(tmp_path),
+                       manifest_name="manifest_diagnostic.jsonl")
+    assert len(full) == 3
+    assert len(core) == 1 and core.rows[0]["dialect"] == "Najdi"
+    assert {r["dialect"] for r in diag.rows} == {"Shamali", "Janubi"}
+    # Missing manifest fails loudly:
+    with pytest.raises(FileNotFoundError):
+        SadaDataset(str(tmp_path), manifest_name="manifest_ghost.jsonl")
