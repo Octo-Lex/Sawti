@@ -1,0 +1,106 @@
+"""SA Task 3: SadaDataset + WhisperCollator + deterministic augmentation.
+
+Manifest-driven selection (no corpus policy here — label decisions live
+in materialization; the dataset loads whatever the manifest contains).
+Augmentation randomness derives from (seed, epoch, sample index) via
+numpy seed sequences: no shared mutable RNG, so dataloader worker
+ordering cannot change what any sample receives.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+import torch
+
+
+def augment(audio: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Deterministic-seeded augmentation (spec §2.6): random gain,
+    additive gaussian noise at ~15-30 dB SNR, speed perturbation
+    {0.9, 1.0, 1.1} via linear resampling. The augmentation class
+    plausibly behind oddadmix's zero-loop robustness (Addendum 4).
+    Music/reverb: deferred extension."""
+    out = audio.copy()
+    out *= float(rng.uniform(0.5, 1.0))
+    p_signal = float(np.mean(out ** 2)) + 1e-12
+    snr_db = float(rng.uniform(15.0, 30.0))
+    p_noise = p_signal / (10 ** (snr_db / 10))
+    out = out + rng.normal(0.0, p_noise ** 0.5, size=out.shape).astype(np.float32)
+    speed = float(rng.choice([0.9, 1.0, 1.1]))
+    if speed != 1.0:
+        n_out = max(1, int(len(out) / speed))
+        out = np.interp(
+            np.linspace(0.0, len(out) - 1, n_out),
+            np.arange(len(out)), out).astype(np.float32)
+    return out.astype(np.float32)
+
+
+class SadaDataset(torch.utils.data.Dataset):
+    def __init__(self, data_dir: str | Path, max_text_len: int = 448,
+                 augment_enabled: bool = False, seed: int = 0,
+                 epoch: int = 0) -> None:
+        self.dir = Path(data_dir)
+        self.rows = [
+            json.loads(line)
+            for line in (self.dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.max_text_len = max_text_len
+        self.augment_enabled = augment_enabled
+        self.seed = seed
+        self.epoch = epoch
+
+    def set_epoch(self, epoch: int) -> None:
+        """Advance the augmentation stream deterministically per epoch."""
+        self.epoch = epoch
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, i: int) -> dict:
+        r = self.rows[i]
+        audio, sr = sf.read(self.dir / f"{r['clip_id']}.wav", dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        if self.augment_enabled:
+            # Deterministic PER SAMPLE (and epoch): no shared mutable RNG,
+            # so dataloader worker ordering cannot change augmentation.
+            rng = np.random.default_rng([self.seed, self.epoch, i])
+            audio = augment(audio, rng)
+        cleaned = (r.get("cleaned_text") or "").strip()
+        text = cleaned if cleaned else (r.get("text") or "").strip()
+        return {"audio": np.ascontiguousarray(audio, np.float32),
+                "text": text[: self.max_text_len]}
+
+
+class WhisperCollator:
+    """Standard Whisper fine-tuning collator: 30s-padded features + masked
+    labels. The tokenizer is invoked as a callable; BOS is stripped from
+    labels; padded positions are -100."""
+
+    def __init__(self, processor) -> None:
+        self.processor = processor
+
+    def __call__(self, features: list[dict]) -> dict:
+        inputs = self.processor(
+            [f["audio"] for f in features], sampling_rate=16000,
+            return_tensors="pt")
+        tok = self.processor.tokenizer
+        batch = tok(
+            [f["text"] for f in features], padding=True,
+            truncation=True, max_length=448, return_tensors="pt")
+        # Real tokenizers return a mapping (BatchEncoding); some fakes
+        # return attribute objects. Support both.
+        input_ids = batch["input_ids"] if isinstance(
+            batch, dict) else batch.input_ids
+        attention_mask = batch["attention_mask"] if isinstance(
+            batch, dict) else batch.attention_mask
+        labels = input_ids.masked_fill(attention_mask.ne(1), -100)
+        if (labels[:, 0] == tok.bos_token_id).all().cpu().item():
+            labels = labels[:, 1:]
+        out = dict(input_features=inputs.input_features)
+        if hasattr(inputs, "attention_mask"):
+            out["attention_mask"] = inputs.attention_mask
+        out["labels"] = labels
+        return out
