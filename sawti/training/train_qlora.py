@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from transformers import TrainerCallback
+
 LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
 
 
@@ -75,7 +77,7 @@ def build_training_args(out_dir: str, flavor: str = "qlora",
     )
 
 
-class SetEpochCallback:
+class SetEpochCallback(TrainerCallback):
     """Advances the dataset's augmentation stream per epoch so
     (seed, epoch, index) determinism actually varies across epochs in
     training — not merely in isolation tests."""
