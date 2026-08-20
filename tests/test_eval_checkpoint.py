@@ -17,9 +17,13 @@ import torch
 from sawti.training.eval_checkpoint import (
     BEAM5_KWARGS,
     GREEDY_KWARGS,
+    adapter_identity,
     atomic_write_json,
     build_record,
+    evaluator_commit,
+    manifest_identity,
     run_validation,
+    sha256_file,
     stride_sample,
     transcribe_wavs,
 )
@@ -71,30 +75,35 @@ def test_atomic_write_json_fails_before_touching_target(tmp_path):
 
 class _FakeFE:
     """Returns stacked 'features' (the raw waveform matrix) as a real torch
-    tensor so .to(device, dtype) works and the fake model can see exactly
-    which clips the slice contained (rows = clips)."""
+    tensor plus an attention_mask, mirroring return_attention_mask=True —
+    the model can see exactly which clips the slice contained (rows)."""
 
-    def __call__(self, audios, sampling_rate=None, return_tensors=None):
+    def __call__(self, audios, sampling_rate=None, return_tensors=None,
+                 return_attention_mask=None):
         from types import SimpleNamespace
 
         return SimpleNamespace(
-            input_features=torch.from_numpy(np.stack(audios)))
+            input_features=torch.from_numpy(np.stack(audios)),
+            attention_mask=torch.ones(len(audios), 1, dtype=torch.long))
 
 
 class _FakeModel:
-    """generate(features, **kwargs) -> token 'ids' one per clip in batch
-    order; records kwargs so tests can pin the decoding regime."""
+    """generate(input_features, attention_mask, **kwargs) -> token 'ids'
+    one per clip in batch order; records decode kwargs and received masks
+    separately so tests can pin BOTH the regime and the mask plumbing."""
 
     def __init__(self):
         self.calls = []
+        self.masks = []
 
-    def generate(self, feats, **kwargs):
+    def generate(self, input_features, attention_mask=None, **kwargs):
         self.calls.append(kwargs)
+        self.masks.append(attention_mask)
         # id encodes (mean amplitude, n_clips_in_batch): distinct per clip,
         # so misalignment between hyps and manifest rows is detectable.
         # round() absorbs PCM-16 quantization wobble (0.001 -> 0.000976).
-        return [round(float(x.abs().mean()) * 1000) * 100 + len(feats)
-                for x in feats]
+        return [round(float(x.abs().mean()) * 1000) * 100 + len(input_features)
+                for x in input_features]
 
 
 class _FakeTok:
@@ -122,7 +131,10 @@ def test_transcribe_wavs_passes_greedy_kwargs_and_batches(tmp_path):
     hyps = transcribe_wavs(m, _FakeTok(), _FakeFE(), paths, "cpu")
     # amplitudes .001-.003 -> int(mean*1000)=1..3, one batch of 3:
     assert hyps == [f"hyp{i * 100 + 3:06d}" for i in (1, 2, 3)]
-    assert m.calls == [GREEDY_KWARGS]               # regime forwarded verbatim
+    # decode regime forwarded verbatim; attention_mask ALWAYS plumbed
+    # through (mandatory batched-Whisper reviewer check):
+    assert m.calls == [GREEDY_KWARGS]
+    assert len(m.masks) == 1 and m.masks[0] is not None
 
 
 def test_run_validation_preserves_manifest_order_across_batches(tmp_path):
@@ -144,6 +156,7 @@ def test_run_validation_preserves_manifest_order_across_batches(tmp_path):
         assert r["wer"] is not None                    # jiwer ran per row
         assert r["dialect"] == ["Najdi", "Hijazi", "Khaliji"][i % 3]
     assert all(c == GREEDY_KWARGS for c in m.calls) and len(m.calls) == 3
+    assert all(mask is not None for mask in m.masks)  # mask on every batch
     assert captured                                    # progress observable
 
 
@@ -189,3 +202,41 @@ def test_run_validation_rejects_wrong_sample_rate(tmp_path):
     with pytest.raises(ValueError, match="16000"):
         run_validation(_FakeModel(), _FakeTok(), _FakeFE(), "cpu",
                        str(tmp_path), batch_size=1, echo=lambda *_: None)
+
+
+# ---- regime persistence: artifacts must be reproducible evidence ----
+
+def test_manifest_identity_pins_content_hash(tmp_path):
+    _make_val_dir(tmp_path)
+    ident = manifest_identity(tmp_path)
+    assert ident["path"].endswith("manifest.jsonl")
+    assert len(ident["sha256"]) == 64
+    assert ident["sha256"] == sha256_file(tmp_path / "manifest.jsonl")
+    (tmp_path / "manifest.jsonl").write_text("changed", encoding="utf-8")
+    assert manifest_identity(tmp_path)["sha256"] != ident["sha256"]
+    bogus = tmp_path / "nowhere"
+    bogus.mkdir()
+    with pytest.raises(FileNotFoundError):
+        manifest_identity(bogus)
+
+
+def test_adapter_identity_stock_none_and_checkpoint_hashed(tmp_path):
+    assert adapter_identity(None) is None          # stock baseline mode
+    ckpt = tmp_path / "checkpoint-2000"
+    ckpt.mkdir()
+    with pytest.raises(FileNotFoundError):        # empty dir -> fail loud
+        adapter_identity(ckpt)
+    (ckpt / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (ckpt / "adapter_model.safetensors").write_bytes(b"\x00" * 10)
+    ident = adapter_identity(ckpt)
+    assert ident["path"] == str(ckpt)
+    assert set(ident) == {"path", "adapter_config.json",
+                          "adapter_model.safetensors"}
+    assert all(len(v) == 64 for k, v in ident.items() if k != "path")
+
+
+def test_evaluator_commit_is_sha_or_unknown():
+    import re
+
+    sha = evaluator_commit()
+    assert sha == "unknown" or re.fullmatch(r"[0-9a-f]{40}", sha)

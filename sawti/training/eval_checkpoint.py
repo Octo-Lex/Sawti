@@ -19,10 +19,19 @@ Correctness contract (reviewer-approved 2026-08-20):
   this module so both sides share the regime by construction (v2).
 - No chunk_length_s: the materializer already rejects clips > 30s, so
   there is nothing for a chunking pipeline to do.
+- Batched generation passes the feature extractor's attention_mask into
+  model.generate (HF guidance for batched Whisper; mandatory reviewer
+  check 2026-08-20) — padded frames must not leak into encoder attention.
 - Observable + atomic: progress every clip batch; the record is written
   tmp + os.replace ONLY after every clip completed, so an interrupted
   evaluation can never masquerade as a checkpoint score. Full per-clip
   rows are stored (the v1 baseline JSON contained only aggregates).
+- Regime persistence (reviewer requirement 2026-08-20): every result
+  artifact records base model ID, adapter path + per-file SHA-256,
+  transformers/torch versions, dtype, device, batch size, exact
+  generation kwargs, attention_mask flag, validation manifest SHA-256,
+  and the evaluator's own commit SHA — reproducible evidence, not
+  prose-described runs.
 
 OPERATOR (baseline recompute — no --checkpoint, stock model):
   uv run python -m sawti.training.eval_checkpoint \
@@ -69,6 +78,61 @@ BEAM5_KWARGS = {
 DEFAULT_BASE = "openai/whisper-large-v3"
 
 
+def sha256_file(path: str | Path) -> str:
+    """Streaming SHA-256 (1 MiB chunks) — manifests and adapter files are
+    tens-to-hundreds of MB; never read them whole."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def manifest_identity(dev_dir: str | Path) -> dict:
+    """Validation-set identity for artifacts: path + content hash, so a
+    result record pins the exact manifest it was computed against."""
+    m = Path(dev_dir) / "manifest.jsonl"
+    if not m.exists():
+        raise FileNotFoundError(f"{m} not found — no manifest, no eval")
+    return {"path": str(m), "sha256": sha256_file(m)}
+
+
+def adapter_identity(checkpoint: str | Path | None) -> dict | None:
+    """Adapter identity for artifacts: path + per-file hashes. None for
+    the stock baseline run (no adapter)."""
+    if not checkpoint:
+        return None
+    ckpt = Path(checkpoint)
+    files: dict[str, str] = {}
+    for name in ("adapter_config.json", "adapter_model.safetensors"):
+        p = ckpt / name
+        if p.exists():
+            files[name] = sha256_file(p)
+    if not files:
+        raise FileNotFoundError(f"no adapter files under {ckpt}")
+    return {"path": str(ckpt), **files}
+
+
+def evaluator_commit() -> str:
+    """Commit SHA of the evaluator code itself, recorded in every artifact
+    (reviewer requirement: results must be reproducible evidence, not
+    prose-described runs). 'unknown' outside a git checkout."""
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[2]
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                             capture_output=True, text=True, check=True)
+        sha = out.stdout.strip()
+        if len(sha) == 40:
+            return sha
+    except Exception:
+        pass
+    return "unknown"
+
+
 def stride_sample(n: int, k: int) -> list[int]:
     """Deterministic stride indices covering the full manifest range:
     clip i*n//k for i in range(k). No RNG, no duplicates when k <= n,
@@ -95,16 +159,23 @@ def load_wav_mono_16k(path: str | Path):
 def transcribe_wavs(model, tokenizer, feature_extractor, wav_paths,
                     device, generate_kwargs=None) -> list[str]:
     """One explicit-decoding batched generate() call per wav_paths slice.
-    No pipeline in the path: every generation parameter is visible here."""
+    No pipeline in the path: every generation parameter is visible here.
+
+    Batched Whisper inference MUST pass the feature extractor's
+    attention_mask into generate (HF guidance; mandatory reviewer check
+    2026-08-20) so padded frames cannot leak into encoder attention."""
     import torch
 
     if generate_kwargs is None:
         generate_kwargs = GREEDY_KWARGS
     audios = [load_wav_mono_16k(p) for p in wav_paths]
-    feats = feature_extractor(audios, sampling_rate=16000,
-                              return_tensors="pt").input_features
-    feats = feats.to(device, torch.float16)
-    pred = model.generate(feats, **generate_kwargs)
+    batch = feature_extractor(audios, sampling_rate=16000,
+                              return_tensors="pt",
+                              return_attention_mask=True)
+    feats = batch.input_features.to(device, torch.float16)
+    mask = batch.attention_mask.to(device)
+    pred = model.generate(input_features=feats, attention_mask=mask,
+                          **generate_kwargs)
     return [t.strip()
             for t in tokenizer.batch_decode(pred, skip_special_tokens=True)]
 
@@ -214,6 +285,8 @@ def main() -> None:
 
     if not a.out:
         p.error("--out is required unless --benchmark is given")
+    import transformers
+
     baselines = None
     if a.checkpoint:
         from sawti.training.baselines import VALIDATION_BASELINES
@@ -221,11 +294,18 @@ def main() -> None:
     config = {
         "model": a.base,
         "checkpoint": a.checkpoint,
+        "adapter": adapter_identity(a.checkpoint),
         "batch_size": a.batch_size,
         "generate_kwargs": dict(GREEDY_KWARGS),
+        "attention_mask": True,
         "dev": str(a.dev),
+        "manifest": manifest_identity(a.dev),
         "limit": a.limit,
         "dtype": "float16",
+        "device": torch.cuda.get_device_name(0),
+        "transformers_version": transformers.__version__,
+        "torch_version": torch.__version__,
+        "evaluator_commit": evaluator_commit(),
     }
     rows = run_validation(model, processor.tokenizer,
                           processor.feature_extractor, device,
