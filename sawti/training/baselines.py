@@ -1,14 +1,22 @@
 """Validation-specific core-dialect baselines for checkpoint selection.
 
 Established 2026-08-19 by running stock openai/whisper-large-v3 (zero-shot,
-fp16, CUDA, greedy, chunked pipeline) on the EXACT materialized validation
-set (data/sada_training/val: 3,423 clips) with the standard eval_utils
-recipe. These are the ONLY baselines DevEvalCallback may use — never the
-test-derived spike numbers (Addendum 4), which would reintroduce the
-contamination the experimental structure removed.
+fp16, CUDA) on the EXACT materialized validation set
+(data/sada_training/val: 3,423 clips) with the eval_utils metric recipe.
 
-Full per-clip results: data/sada_training/val/zero_shot_baseline.json
-(gitignored, local operator artifact — numbers pinned here in code).
+REGIME CAVEAT (found 2026-08-20): the commit and the original docstring
+claimed "greedy", but no script or per-clip artifact survives to prove it
+— data/sada_training/val/zero_shot_baseline.json contains ONLY aggregates,
+and the surviving spike recipe omitted num_beams, which the HF ASR
+pipeline defaults to 5 (transformers 4.57.6). The v1 numbers below are
+therefore regime-AMBIGUOUS. They are superseded by a v2 recompute with
+sawti.training.eval_checkpoint (explicit greedy, batched FP16, full
+per-clip records in zero_shot_baseline_v2.json) so baseline and candidate
+evaluation share the decoding regime by construction.
+
+These remain the ONLY baselines selection may use — never the test-derived
+spike numbers (Addendum 4), which would reintroduce the contamination the
+experimental structure removed.
 """
 
 VALIDATION_BASELINES = {

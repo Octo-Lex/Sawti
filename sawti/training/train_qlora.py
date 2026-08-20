@@ -2,23 +2,24 @@
 
 Run (OPERATOR):
   uv run python -m sawti.training.train_qlora \\
-    --train data/sada_training/train --dev data/sada_training/val \\
-    --out checkpoints/sa_qlora --flavor qlora
+    --train data/sada_training/train --out checkpoints/sa_qlora_run2 \\
+    --flavor qlora
 
 TRAIN_FLAVOR decided by the Task 0 probe: qlora (bitsandbytes 0.50.1
 verified on this workstation). The lora fallback (fp16 + adamw_torch_fused)
 remains selectable for environments where the probe fails.
 
-Selection regime (DevEvalCallback): a checkpoint is ELIGIBLE only when
-its n-gram loop-rate <= loop_limit_pct (default 5); among eligible
-checkpoints the lowest clean macro WER wins. All four headline metrics
-(clean macro, all-valid macro, all-valid corpus, loop-rate) plus
-per-dialect metrics are logged on every evaluation. Early stop after
-`patience` consecutive non-improving evaluations.
+Run 2 contract (reviewer-approved 2026-08-20): training is DECOUPLED from
+validation. This module only trains and saves sparse adapter checkpoints
+(save_steps=2000, all retained: 2k/4k/6k/8k/10k at max_steps=10000).
+Checkpoint selection happens post-hoc via sawti.training.eval_checkpoint
+(FP16 base + attached adapter, explicit greedy decoding, batched) —
+Run 1 proved live per-clip 4-bit evaluation inside on_save costs hours
+per checkpoint. compute_selection stays here as the shared regime both
+sides agree on.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from transformers import TrainerCallback
@@ -64,8 +65,11 @@ def build_training_args(out_dir: str, flavor: str = "qlora",
         lr_scheduler_type="linear",
         max_steps=max_steps,
         logging_steps=50,
-        save_steps=500,
-        save_total_limit=4,
+        # Run 2: sparse checkpoints, ALL retained (None — save_total_limit
+        # would delete early ones). Selection is post-hoc; training past the
+        # eventual best checkpoint is fine as long as the adapters survive.
+        save_steps=2000,
+        save_total_limit=None,
         eval_strategy="no",
         optim=optim,
         gradient_checkpointing=True,
@@ -139,78 +143,6 @@ def compute_selection(result: dict, baselines: dict,
             "guard_fail": guard_fail, "loop_ok": loop_ok}
 
 
-class DevEvalCallback(TrainerCallback):
-    """Evaluates on the VALIDATION dev set at each save point.
-
-    Selection regime (locked): eligibility requires loop-rate <= limit
-    AND no core-dialect regression beyond baseline+tolerance; the
-    RANKING metric is the unweighted three-dialect selection_score,
-    deliberately NOT the overall clean macro (population skew). All
-    four headline metrics + per-dialect + selection diagnostics are
-    logged every evaluation. Early stop after patience consecutive
-    non-improving evaluations.
-
-    dev is the VALIDATION split — NEVER test-derived data."""
-
-    def __init__(self, eval_fn, log_path: str, patience: int = 3,
-                 loop_limit_pct: float = 5.0,
-                 baselines: dict | None = None,
-                 dialect_tolerance_pp: float = 3.0) -> None:
-        self.eval_fn = eval_fn
-        self.log_path = log_path
-        self.patience = patience
-        self.loop_limit_pct = loop_limit_pct
-        self.baselines = baselines or {}
-        self.dialect_tolerance_pp = dialect_tolerance_pp
-        self.best = float("inf")
-        self.regress = 0
-        self.eval_index = 0
-
-    def _log(self, record: dict) -> None:
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    def on_save(self, args, state, control, model=None, **kw) -> None:
-        self.eval_index += 1
-        result = self.eval_fn(model)
-        sel = compute_selection(result, self.baselines,
-                                self.loop_limit_pct, self.dialect_tolerance_pp)
-        eligible = sel["eligible"]
-        score = sel["selection_score"]
-        is_best = eligible and score < self.best
-        if is_best:
-            self.best, self.regress = score, 0
-        else:
-            self.regress += 1
-        stop = self.regress >= self.patience
-        if control is not None and stop:
-            control.should_training_stop = True
-        self._log({
-            "eval_index": self.eval_index,
-            "clean_macro_wer": result["clean_macro_wer"],
-            "all_valid_macro_wer": result["all_valid_macro_wer"],
-            "all_valid_corpus_wer": result["all_valid_corpus_wer"],
-            "loop_pct": result["loop_pct"],
-            "selection_score": score,
-            "eligible": eligible,
-            "guard_fail": sel["guard_fail"],
-            "loop_ok": sel["loop_ok"],
-            "baselines": self.baselines,
-            "is_best": is_best,
-            "best_selection_score": self.best,
-            "consecutive_regressions": self.regress,
-            "stop": stop,
-            "per_dialect": result.get("per_dialect", {}),
-        })
-        print(f"[dev-eval {self.eval_index}] score {score:.1f} "
-              f"loop {result['loop_pct']:.1f}% "
-              f"{'ELIGIBLE' if eligible else 'INELIGIBLE'} "
-              f"best {self.best:.1f} regress {self.regress}/{self.patience}"
-              f"{' STOP' if stop else ''}"
-              + (f" guards={[g['dialect'] for g in sel['guard_fail']]}"
-                 if sel["guard_fail"] else ""))
-
-
 def main() -> None:
     import argparse
 
@@ -221,20 +153,15 @@ def main() -> None:
 
     from sawti.env import load_env
     load_env(override=True)  # operator entry edge (see env.py policy)
-    from sawti.training.baselines import VALIDATION_BASELINES
     from sawti.training.dataset import SadaDataset, WhisperCollator
 
     p = argparse.ArgumentParser()
     p.add_argument("--train", required=True,
                    help="materialized TRAIN split dir (manifest-driven)")
-    p.add_argument("--dev", default="data/sada_training/val",
-                   help="checkpoint-selection dev set — MUST be the "
-                        "validation split, never test-derived data")
     p.add_argument("--out", required=True)
     p.add_argument("--flavor", default="qlora", choices=["qlora", "lora"])
     p.add_argument("--max-steps", type=int, default=10000)
     p.add_argument("--base", default="openai/whisper-large-v3")
-    p.add_argument("--loop-limit-pct", type=float, default=5.0)
     a = p.parse_args()
 
     dtype = torch.float16
@@ -280,34 +207,14 @@ def main() -> None:
     targs = build_training_args(a.out, flavor=a.flavor,
                                 max_steps=a.max_steps)
 
-    def dev_eval_fn(m) -> dict:
-        from transformers import pipeline
-
-        from sawti.training.eval_utils import aggregate, run_eval
-
-        # NO explicit device: the QLoRA path assigns an Accelerate
-        # device_map automatically, and Pipeline REJECTS a device when
-        # the model has one. Omitting lets both paths resolve normally.
-        asr = pipeline("automatic-speech-recognition", model=m,
-                       tokenizer=processor.tokenizer,
-                       feature_extractor=processor.feature_extractor,
-                       torch_dtype=dtype, chunk_length_s=30)
-        rows = run_eval(lambda w: asr(w, generate_kwargs={
-            "language": "arabic", "task": "transcribe"})["text"].strip(),
-            a.dev)
-        return aggregate(rows)
-
+    # Run 2: training ONLY. No evaluation callback — checkpoint selection
+    # is post-hoc via sawti.training.eval_checkpoint on the saved sparse
+    # adapters (FP16 + explicit greedy + batched).
     trainer = Trainer(
         model=model, args=targs, train_dataset=train_ds,
         data_collator=WhisperCollator(
             processor, decoder_start_token_id=decoder_start_token_id),
-        callbacks=[
-            SetEpochCallback(train_ds),
-            DevEvalCallback(dev_eval_fn,
-                            str(Path(a.out) / "dev_log.jsonl"),
-                            loop_limit_pct=a.loop_limit_pct,
-                            baselines=VALIDATION_BASELINES),
-        ],
+        callbacks=[SetEpochCallback(train_ds)],
     )
     trainer.train()
     model.save_pretrained(str(Path(a.out) / "last_adapter"))

@@ -37,3 +37,6 @@ Thumbs.db
 sample/
 .agent_harnesses.json
 uv-local.toml
+
+# Training run artifacts (adapters, optimizer states, eval records)
+checkpoints/

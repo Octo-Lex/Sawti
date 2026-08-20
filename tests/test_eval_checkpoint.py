@@ -1,0 +1,191 @@
+"""Post-hoc evaluator contract tests (Run 2).
+
+Hermetic: no models, no CUDA, no network. Heavy pieces (model, tokenizer,
+feature_extractor) are injected — run_validation/transcribe_wavs are
+tested against fakes, pinning the properties that made Run 1 fail:
+decoding regime explicitness, batch-order alignment, progress
+observability, and atomic record writes.
+"""
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+import soundfile as sf
+import torch
+
+from sawti.training.eval_checkpoint import (
+    BEAM5_KWARGS,
+    GREEDY_KWARGS,
+    atomic_write_json,
+    build_record,
+    run_validation,
+    stride_sample,
+    transcribe_wavs,
+)
+
+
+def test_greedy_kwargs_pin_the_decoding_regime():
+    """The single decoding authority: greedy by CONSTRUCTION. The HF ASR
+    pipeline defaults num_beams=5 (transformers 4.57.6) — the Run 1
+    callback inherited that silently and was not running the regime its
+    documentation claimed."""
+    assert GREEDY_KWARGS == {"language": "arabic", "task": "transcribe",
+                             "num_beams": 1, "do_sample": False}
+
+
+def test_beam5_kwargs_exist_only_as_benchmark_probe():
+    assert BEAM5_KWARGS["num_beams"] == 5 and BEAM5_KWARGS["do_sample"] is False
+
+
+def test_stride_sample_deterministic_and_spread():
+    assert stride_sample(10, 4) == [0, 2, 5, 7]
+    assert stride_sample(3, 10) == [0, 1, 2]        # k >= n -> everything
+    assert stride_sample(3423, 24) == stride_sample(3423, 24)  # no RNG
+    idx = stride_sample(3423, 24)
+    assert len(set(idx)) == 24 and min(idx) == 0    # spread + no dupes
+    assert max(idx) < 3423
+
+
+def test_atomic_write_json_leaves_no_tmp_and_replaces(tmp_path):
+    out = tmp_path / "record.json"
+    atomic_write_json(out, {"a": 1})
+    assert json.loads(out.read_text(encoding="utf-8")) == {"a": 1}
+    assert not list(tmp_path.glob("*.tmp"))
+    atomic_write_json(out, {"a": 2})                # overwrite via replace
+    assert json.loads(out.read_text(encoding="utf-8")) == {"a": 2}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_write_json_fails_before_touching_target(tmp_path):
+    """Non-serializable record: exception must leave NO file behind —
+    an interrupted evaluation never masquerades as a valid score."""
+    out = tmp_path / "record.json"
+    with pytest.raises(TypeError):
+        atomic_write_json(out, {"bad": object()})
+    assert not out.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+# ---- fakes: the injected surface of the batched evaluator ----
+
+class _FakeFE:
+    """Returns stacked 'features' (the raw waveform matrix) as a real torch
+    tensor so .to(device, dtype) works and the fake model can see exactly
+    which clips the slice contained (rows = clips)."""
+
+    def __call__(self, audios, sampling_rate=None, return_tensors=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            input_features=torch.from_numpy(np.stack(audios)))
+
+
+class _FakeModel:
+    """generate(features, **kwargs) -> token 'ids' one per clip in batch
+    order; records kwargs so tests can pin the decoding regime."""
+
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, feats, **kwargs):
+        self.calls.append(kwargs)
+        # id encodes (mean amplitude, n_clips_in_batch): distinct per clip,
+        # so misalignment between hyps and manifest rows is detectable.
+        # round() absorbs PCM-16 quantization wobble (0.001 -> 0.000976).
+        return [round(float(x.abs().mean()) * 1000) * 100 + len(feats)
+                for x in feats]
+
+
+class _FakeTok:
+    def batch_decode(self, ids, skip_special_tokens=None):
+        return [f"hyp{i:06d}" for i in ids]
+
+
+def _make_val_dir(tmp_path, n=5):
+    for i in range(n):
+        sf.write(tmp_path / f"c{i}.wav",
+                 np.full(1600, (i + 1) / 1000, np.float32), 16000)
+    rows = [{"clip_id": f"c{i}", "dialect": ["Najdi", "Hijazi", "Khaliji"][i % 3],
+             "cleaned_text": "كلام واحد", "duration_s": 2.0}
+            for i in range(n)]
+    (tmp_path / "manifest.jsonl").write_text(
+        chr(10).join(json.dumps(r, ensure_ascii=False) for r in rows),
+        encoding="utf-8")
+    return rows
+
+
+def test_transcribe_wavs_passes_greedy_kwargs_and_batches(tmp_path):
+    paths = [str(tmp_path / f"c{i}.wav") for i in range(3)]
+    _make_val_dir(tmp_path)
+    m = _FakeModel()
+    hyps = transcribe_wavs(m, _FakeTok(), _FakeFE(), paths, "cpu")
+    # amplitudes .001-.003 -> int(mean*1000)=1..3, one batch of 3:
+    assert hyps == [f"hyp{i * 100 + 3:06d}" for i in (1, 2, 3)]
+    assert m.calls == [GREEDY_KWARGS]               # regime forwarded verbatim
+
+
+def test_run_validation_preserves_manifest_order_across_batches(tmp_path):
+    """THE batching hazard: hyps must align to manifest rows through every
+    slice boundary. Fakes make any misalignment observable via clip-specific
+    ids; duration 2.0s keeps all rows non-degenerate so wer is computed."""
+    _make_val_dir(tmp_path, n=5)
+    captured = []
+    m = _FakeModel()
+    rows = run_validation(m, _FakeTok(), _FakeFE(), "cpu", str(tmp_path),
+                          batch_size=2, progress_every=100, echo=captured.append)
+    assert len(rows) == 5
+    assert [r["clip_id"] for r in rows] == [f"c{i}" for i in range(5)]
+    # ids encode mean-amplitude*1000*100 + batch size: batches are 2/2/1,
+    # so the FINAL PARTIAL BATCH has size 1 — alignment must track exactly.
+    expected_ids = [102, 202, 302, 402, 501]
+    for i, r in enumerate(rows):
+        assert r["hyp"] == f"hyp{expected_ids[i]:06d}"
+        assert r["wer"] is not None                    # jiwer ran per row
+        assert r["dialect"] == ["Najdi", "Hijazi", "Khaliji"][i % 3]
+    assert all(c == GREEDY_KWARGS for c in m.calls) and len(m.calls) == 3
+    assert captured                                    # progress observable
+
+
+def test_run_validation_limit_takes_prefix(tmp_path):
+    _make_val_dir(tmp_path, n=5)
+    rows = run_validation(_FakeModel(), _FakeTok(), _FakeFE(), "cpu",
+                          str(tmp_path), batch_size=8, limit=3, echo=lambda *_: None)
+    assert [r["clip_id"] for r in rows] == ["c0", "c1", "c2"]
+
+
+def test_build_record_stock_mode_skips_selection():
+    """baselines=None (stock zero-shot baseline mode): a model cannot be
+    screened against guards derived from itself."""
+    rows = [{"dialect": d, "wer": 0.5, "n_ref_words": 5, "valid_ref": True,
+             "loop": False, "degenerate": False}
+            for d in ("Najdi", "Hijazi", "Khaliji")]
+    rec = build_record(rows, None, {"model": "stock"})
+    assert rec["selection"] is None
+    assert rec["aggregate"]["n"] == 3
+    assert rec["clips"] == rows
+
+
+def test_build_record_checkpoint_mode_wires_selection():
+    # wer rows are FRACTIONS (jiwer convention); aggregate() scales to %.
+    rows = [{"dialect": d, "wer": 0.10, "n_ref_words": 5, "valid_ref": True,
+             "loop": False, "degenerate": False}
+            for d in ("Najdi", "Hijazi", "Khaliji")]
+    baselines = {"Najdi": 46.685, "Hijazi": 49.928, "Khaliji": 56.399}
+    cfg = {"generate_kwargs": dict(GREEDY_KWARGS), "batch_size": 8}
+    rec = build_record(rows, baselines, cfg)
+    assert rec["selection"]["eligible"] is True       # 10 << baselines
+    assert rec["selection"]["selection_score"] == 10.0
+    assert rec["config"] == cfg                       # regime echoed in record
+
+
+def test_run_validation_rejects_wrong_sample_rate(tmp_path):
+    """Non-16k audio is a materializer-contract violation; fail loudly."""
+    sf.write(tmp_path / "c48.wav", np.zeros(4800, np.float32), 48000)
+    (tmp_path / "manifest.jsonl").write_text(
+        json.dumps({"clip_id": "c48", "dialect": "Najdi",
+                    "cleaned_text": "أ", "duration_s": 2.0}),
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="16000"):
+        run_validation(_FakeModel(), _FakeTok(), _FakeFE(), "cpu",
+                       str(tmp_path), batch_size=1, echo=lambda *_: None)
