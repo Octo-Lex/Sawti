@@ -180,9 +180,16 @@ def transcribe_wavs(model, tokenizer, feature_extractor, wav_paths,
             for t in tokenizer.batch_decode(pred, skip_special_tokens=True)]
 
 
+def _echo(msg: str) -> None:
+    """Progress sink: flush always — under output-file redirection Python
+    block-buffers stdout, and an unflushed progress line is invisible for
+    the entire run (found the hard way on Run 2's baseline)."""
+    print(msg, flush=True)
+
+
 def run_validation(model, tokenizer, feature_extractor, device, data_dir,
                    batch_size: int, limit: int | None = None,
-                   progress_every: int = 200, echo=print) -> list[dict]:
+                   progress_every: int = 200, echo=_echo) -> list[dict]:
     """Full validation pass in manifest order, batch_size clips per
     generate() call. Returns annotated rows (writes nothing — the caller
     owns atomicity)."""
@@ -335,7 +342,7 @@ def run_benchmark(model, tokenizer, feature_extractor, device, data_dir,
     idx = stride_sample(len(manifest), k)
     paths = [str(Path(data_dir) / f"{manifest[i]['clip_id']}.wav")
              for i in idx]
-    print(f"benchmark: {len(paths)} stride-sampled clips from "
+    _echo(f"benchmark: {len(paths)} stride-sampled clips from "
           f"{len(manifest)} manifest rows")
 
     results: dict[int, list[str]] = {}
@@ -347,17 +354,17 @@ def run_benchmark(model, tokenizer, feature_extractor, device, data_dir,
                                     paths[lo:lo + bs], device)
         wall = time.perf_counter() - t0
         results[bs] = hyps
-        print(f"batch_size={bs}: {wall:.1f}s wall, "
+        _echo(f"batch_size={bs}: {wall:.1f}s wall, "
               f"{wall / len(paths):.2f}s/clip")
 
     base = results[batch_sizes[0]]
     for bs in batch_sizes[1:]:
         mism = [(i, base[i], results[bs][i])
                 for i in range(len(paths)) if base[i] != results[bs][i]]
-        print(f"identity vs batch-1 at batch_size={bs}: "
+        _echo(f"identity vs batch-1 at batch_size={bs}: "
               f"{'IDENTICAL' if not mism else f'{len(mism)} MISMATCHES'}")
         for i, b, g in mism[:3]:
-            print(f"  clip[{i}] bs1={b!r} bs{bs}={g!r}")
+            _echo(f"  clip[{i}] bs1={b!r} bs{bs}={g!r}")
 
     beam5: list[str] = []
     t0 = time.perf_counter()
@@ -366,7 +373,7 @@ def run_benchmark(model, tokenizer, feature_extractor, device, data_dir,
                                  [path], device, BEAM5_KWARGS)
     wall = time.perf_counter() - t0
     diff = sum(1 for x, y in zip(base, beam5) if x != y)
-    print(f"5-beam probe (batch-1): {wall:.1f}s wall, "
+    _echo(f"5-beam probe (batch-1): {wall:.1f}s wall, "
           f"{diff}/{len(paths)} hypotheses differ from greedy")
 
 
