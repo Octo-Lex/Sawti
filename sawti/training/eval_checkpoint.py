@@ -34,19 +34,28 @@ Correctness contract (reviewer-approved 2026-08-20):
   prose-described runs.
 
 OPERATOR (baseline recompute — no --checkpoint, stock model):
-  uv run python -m sawti.training.eval_checkpoint \
-    --dev data/sada_training/val \
-    --out data/sada_training/val/zero_shot_baseline_v2.json --batch-size 8
+  uv run python -m sawti.training.eval_checkpoint \\
+    --dev data/sada_training/val \\
+    --out data/sada_training/val/zero_shot_baseline_v2.json
 
-OPERATOR (checkpoint evaluation):
-  uv run python -m sawti.training.eval_checkpoint \
-    --checkpoint checkpoints/sa_qlora_run2/checkpoint-2000 \
-    --dev data/sada_training/val \
+OPERATOR (checkpoint evaluation — batch size defaults to the frozen
+selection regime, SELECTION_BATCH_SIZE=4):
+  uv run python -m sawti.training.eval_checkpoint \\
+    --checkpoint checkpoints/sa_qlora_run2/checkpoint-2000 \\
+    --dev data/sada_training/val \\
     --out checkpoints/sa_qlora_run2/eval/checkpoint-2000.json
 
+OPERATOR (supplemental diagnostic view — same machinery, no selection:
+Shamali/Janubi rows live in the TRAIN split's carved view):
+  uv run python -m sawti.training.eval_checkpoint \\
+    --checkpoint checkpoints/sa_qlora_run2/checkpoint-10000 \\
+    --dev data/sada_training/train \\
+    --manifest-name manifest_diagnostic.jsonl \\
+    --out checkpoints/sa_qlora_run2/eval/diagnostic.json
+
 OPERATOR (batch-size benchmark on an existing adapter; writes nothing):
-  uv run python -m sawti.training.eval_checkpoint \
-    --checkpoint checkpoints/sa_qlora/checkpoint-500 \
+  uv run python -m sawti.training.eval_checkpoint \\
+    --checkpoint checkpoints/sa_qlora/checkpoint-500 \\
     --dev data/sada_training/val --benchmark 24
 """
 from __future__ import annotations
@@ -77,6 +86,11 @@ BEAM5_KWARGS = {
 
 DEFAULT_BASE = "openai/whisper-large-v3"
 
+# The authoritative selection batch size (reviewer-pinned): the benchmark
+# showed bs=8 can flip near-tie hypotheses, so 4 is the frozen regime.
+# Pinned by test — do not change without a new benchmark + re-pin ruling.
+SELECTION_BATCH_SIZE = 4
+
 
 def sha256_file(path: str | Path) -> str:
     """Streaming SHA-256 (1 MiB chunks) — manifests and adapter files are
@@ -90,13 +104,16 @@ def sha256_file(path: str | Path) -> str:
     return h.hexdigest()
 
 
-def manifest_identity(dev_dir: str | Path) -> dict:
-    """Validation-set identity for artifacts: path + content hash, so a
-    result record pins the exact manifest it was computed against."""
-    m = Path(dev_dir) / "manifest.jsonl"
+def manifest_identity(dev_dir: str | Path,
+                      manifest_name: str = "manifest.jsonl") -> dict:
+    """Validation-set identity for artifacts: path + content hash of the
+    ACTUALLY SELECTED manifest (not always manifest.jsonl — the reviewer
+    seam: diagnostic views run through the same machinery)."""
+    m = Path(dev_dir) / manifest_name
     if not m.exists():
         raise FileNotFoundError(f"{m} not found — no manifest, no eval")
-    return {"path": str(m), "sha256": sha256_file(m)}
+    return {"name": manifest_name, "path": str(m),
+            "sha256": sha256_file(m)}
 
 
 def adapter_identity(checkpoint: str | Path | None) -> dict | None:
@@ -189,14 +206,16 @@ def _echo(msg: str) -> None:
 
 def run_validation(model, tokenizer, feature_extractor, device, data_dir,
                    batch_size: int, limit: int | None = None,
-                   progress_every: int = 200, echo=_echo) -> list[dict]:
+                   progress_every: int = 200, echo=_echo,
+                   manifest_name: str = "manifest.jsonl") -> list[dict]:
     """Full validation pass in manifest order, batch_size clips per
     generate() call. Returns annotated rows (writes nothing — the caller
-    owns atomicity)."""
+    owns atomicity). manifest_name selects the view (manifest.jsonl =
+    official; manifest_diagnostic.jsonl = supplemental Shamali/Janubi)."""
     from sawti.training.eval_utils import (annotate_degenerate, load_manifest,
                                            wer_clean)
 
-    manifest = load_manifest(data_dir)
+    manifest = load_manifest(data_dir, name=manifest_name)
     if limit is not None:
         manifest = manifest[:limit]
     paths = [str(Path(data_dir) / f"{m['clip_id']}.wav") for m in manifest]
@@ -260,7 +279,14 @@ def main() -> None:
     p.add_argument("--base", default=DEFAULT_BASE)
     p.add_argument("--out", default=None, help="output JSON (required unless "
                    "--benchmark)")
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=SELECTION_BATCH_SIZE,
+                   help=f"clips per generate() call (default "
+                        f"{SELECTION_BATCH_SIZE} = the frozen selection "
+                        f"regime; bs=8 flips near-ties per benchmark)")
+    p.add_argument("--manifest-name", default="manifest.jsonl",
+                   help="manifest view: manifest.jsonl (official "
+                        "validation/test) or manifest_diagnostic.jsonl "
+                        "(supplemental Shamali/Janubi)")
     p.add_argument("--limit", type=int, default=None,
                    help="evaluate only the first N clips (smoke tests)")
     p.add_argument("--benchmark", type=int, default=None, metavar="K",
@@ -294,8 +320,11 @@ def main() -> None:
         p.error("--out is required unless --benchmark is given")
     import transformers
 
+    # Selection guards are a property of the OFFICIAL validation manifest
+    # only: a checkpoint cannot be screened against core-dialect baselines
+    # on a diagnostic view (supplemental reporting, never re-selection).
     baselines = None
-    if a.checkpoint:
+    if a.checkpoint and a.manifest_name == "manifest.jsonl":
         from sawti.training.baselines import VALIDATION_BASELINES
         baselines = VALIDATION_BASELINES
     config = {
@@ -306,7 +335,7 @@ def main() -> None:
         "generate_kwargs": dict(GREEDY_KWARGS),
         "attention_mask": True,
         "dev": str(a.dev),
-        "manifest": manifest_identity(a.dev),
+        "manifest": manifest_identity(a.dev, a.manifest_name),
         "limit": a.limit,
         "dtype": "float16",
         "device": torch.cuda.get_device_name(0),
@@ -316,7 +345,8 @@ def main() -> None:
     }
     rows = run_validation(model, processor.tokenizer,
                           processor.feature_extractor, device,
-                          a.dev, a.batch_size, limit=a.limit)
+                          a.dev, a.batch_size, limit=a.limit,
+                          manifest_name=a.manifest_name)
     record = build_record(rows, baselines, config)
     out = atomic_write_json(a.out, record)
     agg, sel = record["aggregate"], record["selection"]

@@ -17,6 +17,7 @@ import torch
 from sawti.training.eval_checkpoint import (
     BEAM5_KWARGS,
     GREEDY_KWARGS,
+    SELECTION_BATCH_SIZE,
     adapter_identity,
     atomic_write_json,
     build_record,
@@ -27,6 +28,13 @@ from sawti.training.eval_checkpoint import (
     stride_sample,
     transcribe_wavs,
 )
+
+
+def test_selection_batch_size_pinned_at_4():
+    """Reviewer corrective (2026-08-20): the authoritative selection regime
+    is batch_size=4 — bs=8 flips near-tie hypotheses per the benchmark, so
+    8 must never silently come back as the CLI default."""
+    assert SELECTION_BATCH_SIZE == 4
 
 
 def test_greedy_kwargs_pin_the_decoding_regime():
@@ -205,6 +213,41 @@ def test_run_validation_rejects_wrong_sample_rate(tmp_path):
 
 
 # ---- regime persistence: artifacts must be reproducible evidence ----
+
+def test_manifest_identity_pins_selected_manifest(tmp_path):
+    """The seam: identity hashes the manifest ACTUALLY selected — a
+    diagnostic-view run must never be attributed to manifest.jsonl."""
+    _make_val_dir(tmp_path)                       # writes manifest.jsonl
+    (tmp_path / "manifest_diagnostic.jsonl").write_text(
+        json.dumps({"clip_id": "d0", "dialect": "Shamali",
+                    "cleaned_text": "ش", "duration_s": 2.0}) + "\n",
+        encoding="utf-8")
+    official = manifest_identity(tmp_path)
+    diag = manifest_identity(tmp_path, "manifest_diagnostic.jsonl")
+    assert official["name"] == "manifest.jsonl"
+    assert diag["name"] == "manifest_diagnostic.jsonl"
+    assert official["sha256"] != diag["sha256"]
+    with pytest.raises(FileNotFoundError):
+        manifest_identity(tmp_path, "manifest_ghost.jsonl")
+
+
+def test_run_validation_reads_selected_manifest_view(tmp_path):
+    """run_validation evaluates the named view's clips — the fake ids make
+    any manifest confusion (official vs diagnostic rows) detectable."""
+    _make_val_dir(tmp_path, n=5)                  # c0..c4 in manifest.jsonl
+    sf.write(tmp_path / "d0.wav", np.full(1600, 0.006, np.float32), 16000)
+    (tmp_path / "manifest_diagnostic.jsonl").write_text(
+        json.dumps({"clip_id": "d0", "dialect": "Janubi",
+                    "cleaned_text": "جملة", "duration_s": 2.0}) + "\n",
+        encoding="utf-8")
+    rows = run_validation(_FakeModel(), _FakeTok(), _FakeFE(), "cpu",
+                          str(tmp_path), batch_size=4,
+                          manifest_name="manifest_diagnostic.jsonl",
+                          echo=lambda *_: None)
+    assert [r["clip_id"] for r in rows] == ["d0"]
+    assert rows[0]["dialect"] == "Janubi"
+    assert rows[0]["hyp"] == "hyp000601"          # amplitude .006, batch of 1
+
 
 def test_manifest_identity_pins_content_hash(tmp_path):
     _make_val_dir(tmp_path)

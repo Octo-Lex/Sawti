@@ -41,10 +41,12 @@ def wer_clean(ref: str, hyp: str) -> float | None:
     return jiwer.wer(n_ref, n_hyp)
 
 
-def load_manifest(data_dir: str | Path) -> list[dict]:
+def load_manifest(data_dir: str | Path, name: str = "manifest.jsonl") -> list[dict]:
+    """Manifest loader with a view seam: name selects manifest.jsonl
+    (official) or a carved view (e.g. manifest_diagnostic.jsonl)."""
     return [
         json.loads(line)
-        for line in (Path(data_dir) / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (Path(data_dir) / name).read_text(encoding="utf-8").splitlines()
     ]
 
 
