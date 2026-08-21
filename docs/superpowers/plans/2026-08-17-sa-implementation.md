@@ -1440,34 +1440,59 @@ def test_sa_fallback_lane_on_real_speech():
 ```
 - [ ] Verify default-skip: `uv run pytest` → integration SKIPPED, suite green. Commit `test(sa): opt-in integration tests (validation dev + fallback lane)`.
 
-## Task 12: Final eval — full Saudi test slice + report — OPERATOR
+## Task 12: Final eval — paired frozen-evaluator test acceptance — OPERATOR (ONE-SHOT)
 
-- [ ] **Step 1:** Materialize the test slice:
+> **Consumption rule (locked 2026-08-21, reviewer verdict):** the moment
+> these test results are opened, this SADA test split is CONSUMED as final
+> acceptance evidence. If the verdict is FAIL and training/data/hyperparameters
+> change as a result, subsequent acceptance requires a NEW untouched test set;
+> this split must never quietly become checkpoint-development data. Nothing
+> below runs before export + integration are frozen (they are, @ a11e8c6).
+
+- [ ] **Step 1:** Materialize the test slice (fresh — never touched before):
   ```bash
   uv run python -m sawti.training.data_prep --split test --out data/sada_training/test
   ```
-- [ ] **Step 2:** Run the final eval (reuses harness logic; writes per-clip results + aggregates):
+
+- [ ] **Step 2:** TWO fixed passes over the exact same test manifest — stock
+  and the frozen merged model — via the frozen evaluator. NO `--checkpoint`
+  (the selected LoRA is already merged into `models/sa_whisper_v1`); batch
+  size defaults to the frozen 4; explicit greedy + attention_mask throughout:
   ```bash
-  uv run python - <<'PY'
-import sawti.env, torch, json
-from pathlib import Path
-from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline
-from sawti.training.eval_utils import aggregate, run_eval
-OUT = Path("data/sada_training/test")
-proc = WhisperProcessor.from_pretrained("models/sa_merged")
-model = WhisperForConditionalGeneration.from_pretrained("models/sa_merged", dtype=torch.float16).to("cuda")
-asr = pipeline("automatic-speech-recognition", model=model, tokenizer=proc.tokenizer,
-               feature_extractor=proc.feature_extractor, torch_dtype=torch.float16,
-               device=0, chunk_length_s=30)
-rows = run_eval(lambda w: asr(w, generate_kwargs={"language":"arabic","task":"transcribe"})["text"].strip(), OUT)
-agg = aggregate(rows)
-Path("data/sada_training/test/final_eval.json").write_text(
-    json.dumps({"aggregate": agg, "rows": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
-print(json.dumps(agg, indent=1, ensure_ascii=False))
-PY
+  uv run python -m sawti.training.eval_checkpoint     --base openai/whisper-large-v3     --dev data/sada_training/test     --out data/sada_training/test/stock_final.json
+
+  uv run python -m sawti.training.eval_checkpoint     --base models/sa_whisper_v1     --dev data/sada_training/test     --out data/sada_training/test/sa_final.json
   ```
-- [ ] **Step 3:** Write the success verdict into the research report (Addendum 5), reading the emitted `aggregate()` fields: `clean_macro_wer` ≤ 20%? `loop_pct` < 5? every `per_dialect[d]['clean_macro_wer']` < its zero-shot (Najdi 29.4 / Hijazi 44.2 / Khaliji 53.7)? Also REPORT (not gate) `all_valid_macro_wer` AND `all_valid_corpus_wer` vs base (287.4% / 76.2%). State PASS/FAIL per criterion — an honest FAIL is a valid milestone outcome and triggers iteration (more steps/data), not reframing.
-- [ ] **Step 4:** Commit report + any fixes. Merge PR.
+  The full Sawti pipeline is deliberately NOT used: it would mostly measure
+  M4T primary behavior and confound the question this milestone answers —
+  whether the trained Saudi Whisper ASR improved.
+
+- [ ] **Step 3:** BEFORE interpreting scores, assert the two artifacts agree
+  on the regime: identical manifest SHA-256; batch_size == 4 on both;
+  identical generate_kwargs; attention_mask == true on both; identical clip
+  count and clip IDs in manifest order. Record evaluator_commit for both
+  (identical when run consecutively on the frozen tree) as part of the
+  evidence.
+
+- [ ] **Step 4:** Acceptance rules — report PASS/FAIL per criterion; an
+  honest FAIL is a valid milestone outcome and triggers iteration on NEW
+  data/splits, never on this consumed one:
+  - merged `clean_macro_wer` <= 20% — PASS/FAIL
+  - merged `loop_pct` < 5% — PASS/FAIL
+  - REPORT (not gate): merged `all_valid_macro_wer` and
+    `all_valid_corpus_wer`; Najdi / Hijazi / Khaliji clean WER separately
+  - No-dialect-regression guard: deltas vs the FULL-TEST stock artifact from
+    Step 2 under the identical frozen regime — computed on the COMMON-CLEAN
+    paired clips of the two stored per-clip artifacts (a clip is comparable
+    only when BOTH passes classify it non-degenerate), so differing
+    loop/degenerate classifications cannot manufacture an apparent gain.
+    Merged must not exceed stock on any core dialect on those paired clips.
+    The historical 75-clip spike figures (Najdi 29.4 / Hijazi 44.2 /
+    Khaliji 53.7) remain historical context ONLY — not the full population,
+    not decode-regime matched, never the authoritative guard.
+
+- [ ] **Step 5:** Write the verdict into the research report (Addendum 5);
+  commit report + artifacts inventory; merge PR.
 
 ---
 
