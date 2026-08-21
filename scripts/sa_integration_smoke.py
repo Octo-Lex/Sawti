@@ -50,8 +50,9 @@ def main() -> None:
 
     from sawti.build import build_real_pipeline
     from sawti.config import SawtiConfig
+    from sawti.types import AudioChunk
 
-    decisions: list[dict] = []
+    decisions: list = []
     pipe = build_real_pipeline(
         SawtiConfig(),
         on_decision=lambda d: decisions.append(d),
@@ -65,8 +66,27 @@ def main() -> None:
                   f"{'LOW-CONF ' if s.low_confidence else ''}{s.text}")
         assert segs, f"no segments emitted for target {target}"
         assert any(s.text.strip() for s in segs), "all segments empty"
-    print(f"--- gate decisions: {len(decisions)} "
-          f"({sum(1 for d in decisions if d.get('fallback'))} fell back) ---")
+    # on_decision receives GateDecision objects; fallback_path is
+    # None | 'retry' | 'rechunk' | 'asr_mt'.
+    fell_back = sum(1 for d in decisions if d.fallback_path is not None)
+    print(f"--- gate decisions: {len(decisions)} ({fell_back} fell back) ---")
+
+    # The fallback seat is lazy: if no decision fell back on this clip, the
+    # SA provider's ASR lane never fired. Exercise the BUILDER-CONSTRUCTED
+    # provider instance directly on the same real clip so the SA lane
+    # itself is proven on the production path, whatever the gate did.
+    provider = pipe.fallback.asr_mt
+    audio, sr = sf.read(wav, dtype="float32")
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    chunk = AudioChunk(id="smoke", audio=audio, sample_rate=sr,
+                       start_time=0.0, end_time=len(audio) / sr)
+    for target in ("ara", "eng"):
+        res = provider.asr_mt(chunk, target)
+        print(f"--- SA lane target {target}: {res.raw_text!r} "
+              f"({res.timing_ms['path']}) ---")
+        assert res.raw_text.strip(), f"SA lane empty for {target}"
+        assert res.source_lang_guess == "ara"
     print("SMOKE PASS: real speech traversed the full production graph "
           "with the SA provider.")
 
