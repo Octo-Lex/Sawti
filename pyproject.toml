@@ -48,6 +48,11 @@ markers = [
     "integration: tests that load real ML models (skipped unless SAWTI_RUN_INTEGRATION=1)",
 ]
 
+[project.optional-dependencies]
+# M2 live-mic capture edge (plan 2026-08-21-m2-live-mic.md Task 1):
+# optional so default/CI installs never need PortAudio; imports are lazy.
+mic = ["sounddevice>=0.5.5"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
