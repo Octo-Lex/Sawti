@@ -2,9 +2,10 @@
 
 Supersedes the first paired correction (Addendum 3): that version still used
 the legacy unigram/dominance loop detector, which misses the x3 phrase-loop
-failure mode it was supposed to exclude. This version uses the n-gram
-repetition detector (1-8-token spans, >=3 consecutive repeats, plus the
-legacy dominance signal) — self-tested against the known examples.
+failure mode it was supposed to exclude. This version uses the SHARED
+PRODUCTION detector (sawti.loop_detect.is_loop — pure consecutive-block
+semantics, 1-8-token spans, >=3 repeats; lexical frequency NEVER gates),
+identical to the training evaluator and the runtime quality gate.
 
 Four views per reviewer spec:
   1. paired common-clean WER  — non-degenerate under BOTH models (n-gram rule)
@@ -18,11 +19,11 @@ stored values; weights by reference length (macro does not).
 from __future__ import annotations
 
 import json
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
+from sawti.loop_detect import is_loop  # SHARED production detector (M1)
 from sawti.text_normalize import normalize_arabic_for_match
 
 DATA = Path("data/sada_spike")
@@ -43,34 +44,6 @@ def norm(text: str) -> str:
     t = normalize_arabic_for_match(text)
     t = re.sub(r"[^\w\s\u0600-\u06FF]", " ", t)
     return " ".join(t.split())
-
-
-def _loop_run(toks, s, n) -> int:
-    run = 1
-    while s + n * (run + 1) <= len(toks) and toks[s:s + n] == toks[s + n * run: s + n * run + n]:
-        run += 1
-    return run
-
-
-def is_loop(hyp: str, min_repeats: int = 3, max_n: int = 8) -> bool:
-    """Any 1..8-token span repeating >=3 times consecutively, plus the legacy
-    token-dominance signal. Catches the x3 phrase loop (uniq 0.33, most 0.33
-    — invisible to the old rule)."""
-    toks = hyp.split()
-    if len(toks) < min_repeats:
-        return False
-    for n in range(1, max_n + 1):
-        if n * min_repeats > len(toks):
-            break
-        for s in range(len(toks) - n * min_repeats + 1):
-            if toks[s:s + n] == toks[s + n:s + 2 * n] and _loop_run(toks, s, n) >= min_repeats:
-                return True
-    if len(toks) >= 6:
-        uniq = len(set(toks)) / len(toks)
-        most = Counter(toks).most_common(1)[0][1] / len(toks)
-        if uniq < 0.25 or most > 0.6:
-            return True
-    return False
 
 
 def load_all() -> dict[str, dict[str, dict]]:
@@ -111,7 +84,7 @@ def main() -> None:
     models = load_all()
     base = models[BASE]
     all_ids = sorted(base.keys())
-    report: dict = {"base": BASE, "detector": "ngram(1-8,>=3)+dominance", "models": {}}
+    report: dict = {"base": BASE, "detector": "shared:sawti.loop_detect(consecutive-only)", "models": {}}
 
     print(f"BASE = {BASE} (n={len(all_ids)} clips)")
     hdr = (f"{'model':26s} | {'clean macro':>15s} | {'allval macro':>13s} "

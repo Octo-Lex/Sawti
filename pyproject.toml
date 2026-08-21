@@ -33,6 +33,7 @@ sawti = "sawti.cli:app"
 
 [dependency-groups]
 dev = [
+    "bitsandbytes>=0.50.1",
     "datasets>=5.0.1",
     "jiwer>=4.0.0",
     "peft>=0.20.0",

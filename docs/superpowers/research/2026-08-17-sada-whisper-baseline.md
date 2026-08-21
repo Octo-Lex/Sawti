@@ -251,3 +251,87 @@ word errors weighted by reference length (base 76.2%).
 Short-clip view (0.5–1.0s, n=14, floor now enforced): base macro 134.5%/0
 loops; oddadmix 78.6%/0 loops; dev-ahmedhany 1222.6%/14.3% loops —
 short-clip hallucination remains the product-risk differentiator.
+
+## Addendum 5 (2026-08-18): historical metrics recomputed under the AUTHORITATIVE detector — unchanged
+
+SA preflight reconciliation switched the paired-reanalysis harness
+(spikes/sada_paired_reanalysis.py) from its local n-gram+dominance
+detector to the SHARED production detector (sawti.loop_detect.is_loop —
+pure consecutive-block semantics) and recomputed every stored
+hypothesis. Result: **all values are identical to Addendum 4** —
+paired clean macros (+5.1 / −0.6 / +9.0 / +8.7), loop rates (4.0 / 2.7
+/ 0.0 / 4.0), degeneracy membership, and both all-valid views. No
+stored hypothesis was a dominance-only catch, so removing the heuristic
+reclassified nothing. Training selection, the evaluator, the runtime
+gate, and these historical baselines now share one metric definition.
+(The harness retains its paired/common-clean methodology; only the
+detector import changed.)
+
+## Addendum 6 (2026-08-21): FINAL ACCEPTANCE — one-shot SADA test evaluation (Run 2 merged model)
+
+The SA milestone's pre-registered final experiment, executed once per the
+Task 12 protocol (paired frozen-evaluator, commit `b638e85`; consumption
+rule in force from this point).
+
+**Setup.** Fresh test materialization: 3,639 clips / 4.12 h (Najdi 1,684 /
+Khaliji 1,150 / Hijazi 805). Two passes over the identical manifest —
+stock `openai/whisper-large-v3` and merged `models/sa_whisper_v1`
+(checkpoint-10000, selection_score 42.26 validation) — through the frozen
+evaluator: FP16, greedy (num_beams=1, do_sample=False), language=arabic,
+task=transcribe, batch 4, attention_mask into generate. Cross-artifact
+assertions passed BEFORE interpretation: identical manifest SHA-256
+(`7030ef78…`), batch_size 4 both, identical generate_kwargs,
+attention_mask true both, identical 3,639 clip IDs, same evaluator
+commit. Artifacts: `data/sada_training/test/{stock_final,sa_final}.json`
+(local, gitignored; full per-clip records + regime records).
+
+**Results.**
+
+| Metric | Stock | Merged (SA) |
+|---|---|---|
+| clean_macro_wer | 55.61 | **43.33** |
+| all_valid_macro_wer | 86.95 | **51.88** |
+| all_valid_corpus_wer | 62.02 | **37.94** |
+| loop_pct | 2.42 | 2.72 |
+| degenerate_rate | 19.73 | 20.09 |
+
+Paired common-clean dialect deltas (merged − stock; a clip comparable only
+when BOTH passes classify it non-degenerate):
+
+| Dialect | n | Stock | Merged | Delta |
+|---|---|---|---|---|
+| Najdi | 1,296 | 55.91 | 43.71 | **−12.20pp** |
+| Hijazi | 653 | 52.82 | 40.51 | **−12.32pp** |
+| Khaliji | 930 | 56.64 | 43.75 | **−12.89pp** |
+
+**Verdict per pre-registered criteria:**
+1. merged clean_macro_wer <= 20%: **FAIL** (43.33)
+2. merged loop_pct < 5%: **PASS** (2.72)
+3. no dialect regression vs full-test stock on paired common-clean: **PASS**
+   (−12.2 to −12.9pp on all three core dialects; consistent with the
+   validation result, so this is a genuine generalization improvement, not
+   a split artifact)
+
+**Honest reading.** The absolute 20% target was not reached. The high
+degenerate/short-clip rate and large stock-model error indicate
+substantial dataset and task difficulty, but do not establish a
+mathematical WER floor (clean_macro_wer excludes degenerate rows
+entirely; corpus WER includes valid-reference rows regardless of
+degeneracy — neither metric turns the degenerate rate into a bound).
+Further progress plausibly requires cleaner and more representative
+Saudi dialectal data rather than simply extending optimization on the
+current SADA training set. The held-out test result nevertheless
+demonstrates generalization: the merged model improves paired
+common-clean WER by 12.2-12.9pp on each core dialect while keeping loop
+rate below 5%. (Note: the validation selection score 42.26 is a
+dialect-balanced mean; the test 43.33 is clip-weighted clean macro —
+different metrics, not directly comparable deltas.)
+
+**Consumption rule (now ACTIVE).** This SADA test split is spent as final
+acceptance evidence. Any training/data/hyperparameter iteration triggered
+by the FAIL on criterion 1 requires a NEW untouched test set; this split
+must not become checkpoint-development data.
+
+Historical context only (75-clip spike, Addendum 4 regime): Najdi 29.4 /
+Hijazi 44.2 / Khaliji 53.7 — not the full population, not decode-regime
+matched, superseded by the full-test paired numbers above.
