@@ -266,3 +266,67 @@ reclassified nothing. Training selection, the evaluator, the runtime
 gate, and these historical baselines now share one metric definition.
 (The harness retains its paired/common-clean methodology; only the
 detector import changed.)
+
+## Addendum 6 (2026-08-21): FINAL ACCEPTANCE — one-shot SADA test evaluation (Run 2 merged model)
+
+The SA milestone's pre-registered final experiment, executed once per the
+Task 12 protocol (paired frozen-evaluator, commit `b638e85`; consumption
+rule in force from this point).
+
+**Setup.** Fresh test materialization: 3,639 clips / 4.12 h (Najdi 1,684 /
+Khaliji 1,150 / Hijazi 805). Two passes over the identical manifest —
+stock `openai/whisper-large-v3` and merged `models/sa_whisper_v1`
+(checkpoint-10000, selection_score 42.26 validation) — through the frozen
+evaluator: FP16, greedy (num_beams=1, do_sample=False), language=arabic,
+task=transcribe, batch 4, attention_mask into generate. Cross-artifact
+assertions passed BEFORE interpretation: identical manifest SHA-256
+(`7030ef78…`), batch_size 4 both, identical generate_kwargs,
+attention_mask true both, identical 3,639 clip IDs, same evaluator
+commit. Artifacts: `data/sada_training/test/{stock_final,sa_final}.json`
+(local, gitignored; full per-clip records + regime records).
+
+**Results.**
+
+| Metric | Stock | Merged (SA) |
+|---|---|---|
+| clean_macro_wer | 55.61 | **43.33** |
+| all_valid_macro_wer | 86.95 | **51.88** |
+| all_valid_corpus_wer | 62.02 | **37.94** |
+| loop_pct | 2.42 | 2.72 |
+| degenerate_rate | 19.73 | 20.09 |
+
+Paired common-clean dialect deltas (merged − stock; a clip comparable only
+when BOTH passes classify it non-degenerate):
+
+| Dialect | n | Stock | Merged | Delta |
+|---|---|---|---|---|
+| Najdi | 1,296 | 55.91 | 43.71 | **−12.20pp** |
+| Hijazi | 653 | 52.82 | 40.51 | **−12.32pp** |
+| Khaliji | 930 | 56.64 | 43.75 | **−12.89pp** |
+
+**Verdict per pre-registered criteria:**
+1. merged clean_macro_wer <= 20%: **FAIL** (43.33)
+2. merged loop_pct < 5%: **PASS** (2.72)
+3. no dialect regression vs full-test stock on paired common-clean: **PASS**
+   (−12.2 to −12.9pp on all three core dialects; consistent with the
+   validation result, so this is a genuine generalization improvement, not
+   a split artifact)
+
+**Honest reading.** The 20% absolute target — set in the original spec
+before the difficulty of Saudi dialectal TV speech and the SADA reference
+quality were quantified — was not reached. The ~20% degenerate rate
+(empty/invalid references and hallucination-prone sub-1s TV snippets)
+bounds how low corpus WER can go on this data; closing the remaining gap
+to 20% plausibly requires cleaner/higher-volume dialectal data rather
+than more steps on SADA. The relative outcome is unambiguous: ~12pp
+improvement on every core dialect, ~35pp on all-valid macro, at a stable
+2.7% loop rate — the Saudi fine-tune works and generalizes.
+
+**Consumption rule (now ACTIVE).** This SADA test split is spent as final
+acceptance evidence. Any training/data/hyperparameter iteration triggered
+by the FAIL on criterion 1 requires a NEW untouched test set; this split
+must not become checkpoint-development data.
+
+Historical context only (75-clip spike, Addendum 4 regime): Najdi 29.4 /
+Hijazi 44.2 / Khaliji 53.7 — not the full population, not decode-regime
+matched, superseded by the full-test paired numbers above.
