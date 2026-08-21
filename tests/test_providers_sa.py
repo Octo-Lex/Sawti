@@ -76,8 +76,12 @@ class _FakeMtProc:
 def _provider(tmp_path=None, mt=True):
     from sawti.providers_sa import SaudiWhisperM4TProvider
 
+    # device="cpu": the provider moves generate inputs to self.device —
+    # the CUDA default would crash on GPU-less CI runners (found the hard
+    # way: local GPU masked the dependency).
     fake_mt = (_FakeMtProc(), _FakeMtModel()) if mt else None
-    return (SaudiWhisperM4TProvider(_sa=(_FakeProc(), _FakeSA()), _mt=fake_mt),
+    return (SaudiWhisperM4TProvider(_sa=(_FakeProc(), _FakeSA()), _mt=fake_mt,
+                                    device="cpu"),
             fake_mt)
 
 
