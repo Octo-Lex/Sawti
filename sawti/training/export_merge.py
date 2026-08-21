@@ -19,9 +19,11 @@ Contract (reviewer-released 2026-08-20):
 - Provenance JSON in the export dir records the selected adapter's
   per-file SHA-256 (selection identity), base model ID, library
   versions, exporter commit, and the selection artifact reference.
-- --verify K (default 16) reloads the EXPORTED artifact and checks
-  hypothesis parity against the adapter-attached model on K
-  stride-sampled validation clips under the frozen evaluator regime.
+- --verify K (default 16) reloads the EXPORTED artifact standalone —
+  model AND processor (tokenizer + feature extractor) loaded from the
+  export dir — and checks hypothesis parity against the
+  adapter-attached model on K stride-sampled validation clips under the
+  frozen evaluator regime: a genuine self-contained export smoke.
 - NOT done here: pipeline integration (gated on exporter review + a
   direct ASR smoke of the merged artifact); test-split evaluation
   (LOCKED — one-shot final acceptance only).
@@ -39,6 +41,38 @@ from sawti.training.eval_checkpoint import (
     sha256_file,
     stride_sample,
 )
+
+
+def verify_selection_binding(checkpoint: str, selection_artifact: str) -> dict:
+    """Fail-closed semantic binding (reviewer correction 1): existence +
+    SHA alone would let `--checkpoint checkpoint-8000 --selection
+    eval/checkpoint-10000.json` claim traceability to the wrong evidence.
+    The artifact must PARSE as an eligible selection whose stored adapter
+    hashes ARE the adapter being exported."""
+    rec = json.loads(Path(selection_artifact).read_text(encoding="utf-8"))
+    sel = rec.get("selection")
+    if sel is None:
+        raise ValueError(
+            f"{selection_artifact}: no selection record (baseline-mode "
+            f"artifact) — it cannot justify exporting any checkpoint")
+    if sel.get("eligible") is not True:
+        raise ValueError(
+            f"{selection_artifact}: selection INELIGIBLE "
+            f"(guard_fail={sel.get('guard_fail')}, loop_ok="
+            f"{sel.get('loop_ok')}) — refusing to export")
+    stored = (rec.get("config") or {}).get("adapter")
+    if not stored:
+        raise ValueError(f"{selection_artifact}: no adapter identity stored")
+    actual = adapter_identity(checkpoint)
+    for key in ("adapter_config.json", "adapter_model.safetensors"):
+        if stored.get(key) != actual[key]:
+            raise ValueError(
+                f"selection/checkpoint MISMATCH on {key}: artifact has "
+                f"{str(stored.get(key))[:12]}…, checkpoint being exported "
+                f"is {actual[key][:12]}… — export exactly the selected "
+                f"adapter, nothing else")
+    return {"eligible": True, "adapter_hashes_match": True,
+            "selection_score": sel.get("selection_score")}
 
 
 def build_provenance(checkpoint: str, base: str, out_dir: str | Path,
@@ -65,6 +99,10 @@ def build_provenance(checkpoint: str, base: str, out_dir: str | Path,
             raise FileNotFoundError(
                 f"selection artifact {p} not found — the export must "
                 f"reference the evidence that selected this adapter")
+        # SEMANTIC BINDING, not just hashing: eligible record + the exact
+        # adapter hashes being exported (fails closed on any mismatch).
+        prov["selection_binding"] = verify_selection_binding(
+            checkpoint, selection_artifact)
         prov["selection_artifact_sha256"] = sha256_file(p)
     return prov
 
@@ -107,12 +145,14 @@ def merge_and_export(checkpoint: str, base: str, out_dir: str | Path,
 def verify_parity(checkpoint: str, base: str, export_dir: str | Path,
                   dev_dir: str, k: int = 16,
                   batch_size: int = SELECTION_BATCH_SIZE) -> dict:
-    """Reloads the EXPORTED artifact standalone (no adapter anywhere in
-    the path) and compares hypotheses against the adapter-attached model
-    on k stride-sampled validation clips under the frozen regime.
-    merge is exact algebra, so fp16 rounding may still flip near-ties —
-    diffs are REPORTED, not hidden; a large diff count means the export
-    is suspect."""
+    """Self-contained export smoke (reviewer correction 2): the merged
+    side runs on WhisperProcessor.from_pretrained(export_dir) — tokenizer
+    AND feature extractor loaded from the exported package — so the check
+    proves the complete artifact, not just the weights. The reference side
+    keeps the base processor with the adapter-attached model. Hypotheses
+    must match on k stride-sampled validation clips under the frozen
+    regime; merge is exact algebra, but fp16 rounding can flip near-ties —
+    diffs are REPORTED, not hidden."""
     import torch
 
     from sawti.training.eval_checkpoint import transcribe_wavs
@@ -127,7 +167,8 @@ def verify_parity(checkpoint: str, base: str, export_dir: str | Path,
     from peft import PeftModel
     from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-    proc = WhisperProcessor.from_pretrained(base)
+    base_proc = WhisperProcessor.from_pretrained(base)
+    export_proc = WhisperProcessor.from_pretrained(str(export_dir))
     ref = WhisperForConditionalGeneration.from_pretrained(
         base, dtype=torch.float16).to(device)
     ref = PeftModel.from_pretrained(ref, checkpoint).eval()
@@ -138,10 +179,11 @@ def verify_parity(checkpoint: str, base: str, export_dir: str | Path,
     merged_hyps: list[str] = []
     for lo in range(0, len(paths), batch_size):
         sl = paths[lo:lo + batch_size]
-        ref_hyps += transcribe_wavs(ref, proc.tokenizer,
-                                    proc.feature_extractor, sl, device)
-        merged_hyps += transcribe_wavs(merged, proc.tokenizer,
-                                       proc.feature_extractor, sl, device)
+        ref_hyps += transcribe_wavs(ref, base_proc.tokenizer,
+                                    base_proc.feature_extractor, sl, device)
+        merged_hyps += transcribe_wavs(merged, export_proc.tokenizer,
+                                       export_proc.feature_extractor, sl,
+                                       device)
     diffs = [{"i": i, "adapter": a, "merged": m}
              for i, (a, m) in enumerate(zip(ref_hyps, merged_hyps))
              if a != m]
