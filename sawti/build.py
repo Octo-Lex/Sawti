@@ -117,6 +117,13 @@ def build_real_pipeline(
             from sawti.providers import WhisperM4TProvider
 
             provider = WhisperM4TProvider(device=dev)
+        elif provider == "sa":
+            # SA integration (locked shape): merged Saudi Whisper export in
+            # the ASR seat + the existing M4T MT lane. Lazy-loading — no
+            # model weights are touched at build time.
+            from sawti.providers_sa import SaudiWhisperM4TProvider
+
+            provider = SaudiWhisperM4TProvider(device=dev)
     else:
         provider = None
 

@@ -61,6 +61,19 @@ class WhisperM4TProvider:
             self._mt = (processor, model)
         return self._mt
 
+    def _translate(self, text: str, src: str, tgt: str) -> str:
+        """M4T T2TT lane shared with the SA provider (extracted from
+        asr_mt; behavior identical)."""
+        processor, model = self._ensure_mt()
+        src_code = _SAWTI_TO_M4T_SOURCE[src]
+        tgt_code = _SAWTI_TO_M4T_SOURCE[tgt]
+        inputs = processor(text=text, src_lang=src_code, tgt_lang=tgt_code,
+                           return_tensors="pt").to(self.device)
+        ids = model.generate(**inputs, tgt_lang=tgt_code)[0]
+        ids = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+        return processor.tokenizer.decode(
+            ids, skip_special_tokens=True).strip()
+
     def asr_mt(self, chunk: AudioChunk, target_lang: str) -> EngineResult:
         t0 = time.perf_counter()
         audio = np.ascontiguousarray(chunk.audio, dtype=np.float32)
@@ -71,15 +84,7 @@ class WhisperM4TProvider:
         detected = _WHISPER_TO_SAWTI.get(raw_lang)
         unmapped = detected is None and bool(raw_lang)
         if detected is not None and detected != target_lang:
-            processor, model = self._ensure_mt()
-            src = _SAWTI_TO_M4T_SOURCE[detected]
-            tgt = _SAWTI_TO_M4T_SOURCE[target_lang]
-            inputs = processor(text=text, src_lang=src, tgt_lang=tgt,
-                               return_tensors="pt").to(self.device)
-            ids = model.generate(**inputs, tgt_lang=tgt)[0]
-            ids = ids.tolist() if hasattr(ids, "tolist") else list(ids)
-            text = processor.tokenizer.decode(
-                ids, skip_special_tokens=True).strip()
+            text = self._translate(text, detected, target_lang)
         # UNMAPPED detected language (e.g. Whisper reports a language we
         # do not support): the ASR transcript is preserved but the result
         # is explicitly UNTRUSTED — confidence 0.0 and a marker in
