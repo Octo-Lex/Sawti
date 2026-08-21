@@ -312,15 +312,20 @@ when BOTH passes classify it non-degenerate):
    validation result, so this is a genuine generalization improvement, not
    a split artifact)
 
-**Honest reading.** The 20% absolute target — set in the original spec
-before the difficulty of Saudi dialectal TV speech and the SADA reference
-quality were quantified — was not reached. The ~20% degenerate rate
-(empty/invalid references and hallucination-prone sub-1s TV snippets)
-bounds how low corpus WER can go on this data; closing the remaining gap
-to 20% plausibly requires cleaner/higher-volume dialectal data rather
-than more steps on SADA. The relative outcome is unambiguous: ~12pp
-improvement on every core dialect, ~35pp on all-valid macro, at a stable
-2.7% loop rate — the Saudi fine-tune works and generalizes.
+**Honest reading.** The absolute 20% target was not reached. The high
+degenerate/short-clip rate and large stock-model error indicate
+substantial dataset and task difficulty, but do not establish a
+mathematical WER floor (clean_macro_wer excludes degenerate rows
+entirely; corpus WER includes valid-reference rows regardless of
+degeneracy — neither metric turns the degenerate rate into a bound).
+Further progress plausibly requires cleaner and more representative
+Saudi dialectal data rather than simply extending optimization on the
+current SADA training set. The held-out test result nevertheless
+demonstrates generalization: the merged model improves paired
+common-clean WER by 12.2-12.9pp on each core dialect while keeping loop
+rate below 5%. (Note: the validation selection score 42.26 is a
+dialect-balanced mean; the test 43.33 is clip-weighted clean macro —
+different metrics, not directly comparable deltas.)
 
 **Consumption rule (now ACTIVE).** This SADA test split is spent as final
 acceptance evidence. Any training/data/hyperparameter iteration triggered
