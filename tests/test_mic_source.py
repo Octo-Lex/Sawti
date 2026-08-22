@@ -264,9 +264,25 @@ def test_stats_overflow_counters_increment():
     assert s["queue_overflow_count"] == 1
     assert s["input_overflow_count"] == 1
     assert s["queue_high_water"] == 1
-    # captured counts everything PortAudio DELIVERED (3200) — the gap vs
-    # what actually landed (1600) is exactly how a drop becomes visible.
+    # captured = status-clean samples delivered to the callback (the
+    # queue-overflow block is counted; input-status failures are tracked
+    # separately in input_overflow_count).
     assert s["captured_samples"] == 3200
+
+
+def test_emitted_counter_counts_suspended_frame():
+    """Reviewer blocker (Task 6): a frame already handed downstream must
+    count as emitted even if the generator is NEVER resumed — a Ctrl+C
+    while downstream inference holds the source suspended unwinds without
+    executing any post-yield code, and the stderr summary must not
+    under-report delivered audio by a block."""
+    src = _src(FakeSD(blocks=[np.zeros(1600), np.zeros(1600)]))
+    gen = src.iter_frames()
+    frame = next(gen)
+    assert src.stats()["emitted_samples"] == len(frame.audio)
+    assert src.stats()["emitted_seconds"] == 0.1
+    gen.close()                                   # no resume, no exhaustion
+    assert src.stats()["emitted_samples"] == len(frame.audio)
 
 # ---- reviewer blocker regressions (Tasks 2-3 REQUEST CHANGES round) ----
 

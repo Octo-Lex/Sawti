@@ -189,12 +189,21 @@ class MicSource:
                     # End-of-stream sentinel: only injected backends/tests
                     # use it; PortAudio never produces a None block.
                     break
+                # Count as emitted BEFORE handing the frame downstream
+                # (reviewer blocker, Task 6): once the generator suspends
+                # in yield — e.g. while M4T/gate/fallback runs, or the
+                # session unwinds via Ctrl+C — post-yield code may never
+                # execute, and the stats must not under-report delivered
+                # audio. Timestamp still comes from the pre-increment
+                # cursor, so session timestamps are unchanged.
+                timestamp_s = self._samples_emitted / TARGET_SR
+                self._samples_emitted += int(block.shape[0])
+
                 yield AudioFrame(
                     audio=np.ascontiguousarray(block, dtype=np.float32),
                     sample_rate=TARGET_SR,
-                    timestamp_s=self._samples_emitted / TARGET_SR,
+                    timestamp_s=timestamp_s,
                 )
-                self._samples_emitted += int(block.shape[0])
         finally:
             self.close()
 
@@ -234,7 +243,13 @@ class MicSource:
     def stats(self) -> dict:
         """Read-only capture observability snapshot (plan Task 6). RTF
         trouble must become visible here long before the bounded queue
-        reaches its hard failure boundary."""
+        reaches its hard failure boundary.
+
+        captured_samples = status-clean samples delivered to the
+        callback; queue-overflow samples are counted here (the block
+        reached us but could not be queued), while input-status failures
+        are represented separately by input_overflow_count — their audio
+        never enters the pipeline."""
         return {
             "captured_samples": self._captured_samples,
             "captured_seconds": round(self._captured_samples / TARGET_SR, 3),
