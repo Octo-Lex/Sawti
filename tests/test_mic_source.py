@@ -179,7 +179,10 @@ def test_input_overflow_status_fails_loudly():
     src._queue = Queue(maxsize=4)
     src._on_audio(np.zeros((1600, 1), np.float32), 1600, None,
                   status="input overflow")
-    assert src._queue.qsize() == 0  # overflowed block NOT enqueued
+    # The overflowed audio block is NOT enqueued; the queue holds exactly
+    # the _ERROR_WAKE token that releases a blocked consumer.
+    assert src._queue.qsize() == 1
+    assert src._queue.get_nowait() is ms._ERROR_WAKE
     with pytest.raises(MicOverflowError, match="input overflow"):
         src._raise_deferred()
 
@@ -230,3 +233,102 @@ def test_unavailable_backend_gives_actionable_error(monkeypatch):
     src = MicSource()  # no backend injected -> tries the real import
     with pytest.raises(MicUnavailableError, match="uv sync --extra mic"):
         list(src.iter_frames())
+
+
+# ---- reviewer blocker regressions (Tasks 2-3 REQUEST CHANGES round) ----
+
+class _SilentStream:
+    """Live-stream shape: produces NOTHING after start — the consumer
+    genuinely blocks inside queue.get() until the test intervenes."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.stopped = 0
+        self.closed = 0
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self.stopped += 1
+
+    def close(self):
+        self.closed += 1
+
+
+def test_blocked_consumer_wakes_on_fatal_overflow():
+    """Reviewer blocker 1, genuine race: the consumer is ALREADY blocked
+    inside get() when the callback records a fatal input overflow. The
+    _ERROR_WAKE token must release it with MicOverflowError within a
+    bounded timeout, and no post-error AudioFrame may be emitted."""
+    import threading
+    import time
+
+    sd = FakeSD(blocks=[])
+    silent = _SilentStream(None)
+    sd.InputStream = lambda **kw: silent
+    src = _src(sd)
+    gen = src.iter_frames()
+    outcome: dict = {}
+
+    def consume():
+        try:
+            outcome["frames"] = [next(gen)]
+        except MicOverflowError as e:
+            outcome["error"] = str(e)
+        except BaseException as e:  # noqa: BLE001 - record everything
+            outcome["other"] = repr(e)
+
+    t = threading.Thread(target=consume, daemon=True)
+    t.start()
+    time.sleep(0.3)  # let the consumer reach the blocked get()
+    # Fatal overflow while blocked, then a GOOD block arrives afterwards —
+    # the error must win and that audio must never be yielded.
+    src._on_audio(np.zeros((1600, 1), np.float32), 1600, None,
+                  status="input overflow")
+    src._on_audio(np.ones(1600, np.float32).reshape(-1, 1), 1600, None,
+                  None)
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "consumer stayed blocked after fatal overflow"
+    assert "error" in outcome and "input overflow" in outcome["error"]
+    assert "frames" not in outcome          # no post-error frame emitted
+    assert silent.closed == 1               # teardown still ran
+
+
+def test_post_error_backlog_block_is_never_yielded():
+    """Backlog variant: audio sits in the queue, THEN a fatal overflow is
+    recorded (queue full -> no wake token needed). The pending block must
+    not be yielded before the error surfaces."""
+    src = MicSource(block_ms=100, queue_seconds=0.1)  # 1-block queue
+    src._queue = Queue(maxsize=1)
+    src._on_audio(np.full(1600, 0.25, np.float32).reshape(-1, 1),
+                  1600, None, None)  # backlog present
+    src._on_audio(np.zeros((1600, 1), np.float32), 1600, None,
+                  status="input overflow")  # fatal; queue full -> no token
+    with pytest.raises(MicOverflowError):
+        src._raise_deferred()
+    # Queue holds ONLY the pre-error backlog: nothing dropped, nothing
+    # masked (the wake token was correctly skipped — Full).
+    assert src._queue.qsize() == 1
+    assert np.array_equal(src._queue.get_nowait(),
+                          np.full(1600, 0.25, np.float32))
+
+
+def test_stream_start_failure_still_tears_down():
+    """Reviewer blocker 2: if stream.start() raises after the stream object
+    exists, the lifecycle envelope must still close it (finally covers
+    _open, not just the yield loop)."""
+
+    class _ExplodingStream(_SilentStream):
+        def start(self):
+            raise RuntimeError("PortAudio failed to start")
+
+    sd = FakeSD(blocks=[])
+    exploding = _ExplodingStream(None)
+    sd.InputStream = lambda **kw: exploding
+    src = _src(sd)
+    with pytest.raises(RuntimeError, match="PortAudio failed to start"):
+        list(src.iter_frames())
+    assert exploding.closed == 1 and exploding.stopped == 1
+    src.close()  # idempotent after the failure path already closed it
+    assert exploding.closed == 1

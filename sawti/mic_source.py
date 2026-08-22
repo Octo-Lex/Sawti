@@ -36,6 +36,14 @@ DTYPE = "float32"
 BLOCK_MS = 100
 QUEUE_SECONDS = 30
 
+# Callback wake-up token (reviewer blocker 1): enqueued when a fatal error
+# is recorded so a consumer already blocked inside queue.get() wakes
+# immediately instead of sleeping until the next audio block. Unique
+# object — never confusable with an audio array or the None end-of-stream
+# sentinel. If the queue is FULL the token is unnecessary: backlog already
+# guarantees get() returns.
+_ERROR_WAKE = object()
+
 
 class MicError(Exception):
     """Base: microphone capture problems."""
@@ -122,6 +130,10 @@ class MicSource:
         if status:
             self._capture_error = MicOverflowError(
                 f"PortAudio input status: {status}")
+            try:
+                self._queue.put_nowait(_ERROR_WAKE)
+            except Full:
+                pass  # queue full -> backlog already guarantees a wake-up
             return
         block = np.array(indata, dtype=np.float32, copy=True).reshape(-1)
         try:
@@ -139,14 +151,28 @@ class MicSource:
     # -- AudioSource protocol ---------------------------------------------
 
     def iter_frames(self):
-        self._open()
+        # The lifecycle envelope covers _open() too (reviewer blocker 2):
+        # if stream.start() raises AFTER the stream object exists, the
+        # finally still tears it down. close() is idempotent, so a
+        # preflight failure before any stream exists remains a no-op.
         try:
+            self._open()
             while True:
-                # Deferred fail-loud check FIRST: an error recorded while
-                # the consumer was blocked in get() must surface even if a
-                # sentinel/backlog sits in the queue ahead of it.
+                # Deferred fail-loud check FIRST: an error recorded before
+                # this iteration must surface even if backlog/sentinel sits
+                # in the queue ahead of it.
                 self._raise_deferred()
                 block = self._queue.get()
+                # And AGAIN after get(), before yielding anything: a fatal
+                # error recorded while the consumer was blocked inside
+                # get() (woken by _ERROR_WAKE or by backlog) must kill the
+                # session before any post-error frame is emitted.
+                self._raise_deferred()
+                if block is _ERROR_WAKE:
+                    # Defensive: the wake token without a recorded error is
+                    # a wiring bug — fail loudly, never yield it as audio.
+                    raise MicCaptureError(
+                        "capture wake token without a recorded error")
                 if block is None:
                     # End-of-stream sentinel: only injected backends/tests
                     # use it; PortAudio never produces a None block.
