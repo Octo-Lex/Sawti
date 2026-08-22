@@ -1,6 +1,9 @@
-"""Typer CLI: `sawti transcribe` and `sawti eval`.
+"""Typer CLI: `sawti transcribe`, `sawti eval`, `sawti listen`.
 
 `transcribe` supports --engine stub (default, hermetic) | m4t (real SeamlessM4T).
+`listen` (M2) is the live-microphone edge: MicSource -> the SAME production
+graph as `transcribe --engine m4t`; transcript to stdout, capture stats to
+stderr, Ctrl+C = clean session end.
 """
 from __future__ import annotations
 
@@ -98,6 +101,86 @@ def eval(
     transcriber = make_pipeline_transcriber(factory, target)
     report = run_eval(eval_set, target_lang=target, transcriber=transcriber)
     typer.echo(f"Wrote report: {report}")
+
+
+@app.command()
+def listen(
+    target: str = typer.Option("eng", help="Target language: eng|ara|fra"),
+    device: str = typer.Option(
+        None, help="Microphone: numeric PortAudio device id or name "
+                   "substring (omit for the backend default)"),
+    list_devices: bool = typer.Option(
+        False, "--list-devices",
+        help="List capture devices and exit (no models loaded)"),
+    config_path: Path = typer.Option(Path("config/default.yaml"), help="Config YAML"),
+) -> None:
+    """Live microphone -> timestamped target-language text (M2).
+
+    Same production graph as `transcribe --engine m4t`; only the audio
+    source changes (MicSource instead of FileSource). Ctrl+C ends the
+    session cleanly. Transcript goes to stdout; capture stats to stderr.
+    """
+    from sawti.env import load_env
+
+    load_env()  # entry edge: fills absent vars only — OS environment wins
+    if target not in ("eng", "ara", "fra"):
+        raise typer.BadParameter(
+            f"unsupported target {target!r} — expected eng, ara or fra")
+    if list_devices:
+        _list_input_devices()  # sounddevice ONLY — never the ML graph
+        raise typer.Exit()
+
+    configure_logging()
+    config = load_config(config_path) if config_path.exists() else SawtiConfig()
+    # Typer delivers --device as text: an all-digit value is a PortAudio
+    # device id (int), everything else a name substring. Normalized here
+    # so "3" is id 3, not a substring search (reviewer pin, Task 4).
+    dev = int(device) if device is not None and device.isdigit() else device
+
+    from sawti.mic_source import MicError, MicSource
+
+    src = MicSource(device=dev)
+    try:
+        pipe = _real_pipeline(config)
+        for seg in pipe.run(src, target_lang=target):
+            typer.echo(f"[{seg.start_time:.2f}-{seg.end_time:.2f}] {seg.text}")
+    except KeyboardInterrupt:
+        pass  # Ctrl+C: normal session end — clean teardown below, no traceback
+    except MicError as e:
+        typer.echo(f"listen: {e}", err=True)
+        raise typer.Exit(code=1)
+    finally:
+        src.close()
+        _print_capture_stats(src)
+
+
+def _list_input_devices() -> None:
+    """--list-devices: sounddevice only. Must never import or build any
+    part of the ML graph (plan Task 4)."""
+    try:
+        import sounddevice as sd
+    except Exception as e:
+        typer.echo(f"listen: microphone backend unavailable: {e}\n"
+                   f"install it with: uv sync --extra mic", err=True)
+        raise typer.Exit(code=1)
+    for i, d in enumerate(sd.query_devices()):
+        if d.get("max_input_channels", 0) > 0:
+            typer.echo(f"{i}: {d.get('name')} "
+                       f"({d.get('max_input_channels')} in, "
+                       f"default {d.get('default_samplerate')} Hz)")
+
+
+def _print_capture_stats(src) -> None:
+    """Session capture summary — stderr only, transcript stdout stays
+    machine-friendly (plan Task 6)."""
+    s = src.stats()
+    typer.echo(
+        "[capture] {captured_seconds}s captured / {emitted_seconds}s "
+        "emitted | queue high-water {queue_high_water} "
+        "(now {queue_depth}) | input overflows {input_overflow_count} | "
+        "queue overflows {queue_overflow_count} | device "
+        "{selected_device} @ {sample_rate} Hz x {block_ms} ms".format(**s),
+        err=True)
 
 
 if __name__ == "__main__":

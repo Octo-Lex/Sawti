@@ -235,6 +235,39 @@ def test_unavailable_backend_gives_actionable_error(monkeypatch):
         list(src.iter_frames())
 
 
+# ---- Task 6: capture observability snapshot ----
+
+def test_stats_snapshot_after_clean_run():
+    src = _src(FakeSD(blocks=[np.zeros(1600), np.zeros(1600)]))
+    frames = list(src.iter_frames())
+    assert len(frames) == 2
+    s = src.stats()
+    assert s["captured_samples"] == 3200 and s["emitted_samples"] == 3200
+    assert s["captured_seconds"] == 0.2 and s["emitted_seconds"] == 0.2
+    assert s["queue_high_water"] >= 1 and s["queue_depth"] == 0
+    assert s["input_overflow_count"] == 0 and s["queue_overflow_count"] == 0
+    assert s["sample_rate"] == 16000 and s["block_ms"] == 100
+    assert s["blocksize_samples"] == 1600
+    assert s["selected_device"] is None  # device=None passes through
+
+
+def test_stats_overflow_counters_increment():
+    src = MicSource(block_ms=100, queue_seconds=0.1)  # 1-block queue
+    src._queue = Queue(maxsize=1)
+    src._on_audio(np.zeros(1600, np.float32).reshape(-1, 1), 1600,
+                  None, None)                    # fills the queue
+    src._on_audio(np.zeros(1600, np.float32).reshape(-1, 1), 1600,
+                  None, None)                    # queue full -> counted
+    src._on_audio(np.zeros((1600, 1), np.float32), 1600, None,
+                  status="input overflow")       # status -> counted
+    s = src.stats()
+    assert s["queue_overflow_count"] == 1
+    assert s["input_overflow_count"] == 1
+    assert s["queue_high_water"] == 1
+    # captured counts everything PortAudio DELIVERED (3200) — the gap vs
+    # what actually landed (1600) is exactly how a drop becomes visible.
+    assert s["captured_samples"] == 3200
+
 # ---- reviewer blocker regressions (Tasks 2-3 REQUEST CHANGES round) ----
 
 class _SilentStream:

@@ -79,6 +79,11 @@ class MicSource:
         self._samples_emitted = 0
         self._capture_error: MicError | None = None
         self.selected_device = None
+        # Observability counters (plan Task 6) — monotonic under the GIL.
+        self._captured_samples = 0
+        self._status_overflow_count = 0
+        self._queue_overflow_count = 0
+        self._queue_high_water = 0
 
     # -- backend & device resolution ------------------------------------
 
@@ -128,6 +133,7 @@ class MicSource:
             self._queue.put_nowait(None)
             return
         if status:
+            self._status_overflow_count += 1
             self._capture_error = MicOverflowError(
                 f"PortAudio input status: {status}")
             try:
@@ -136,12 +142,18 @@ class MicSource:
                 pass  # queue full -> backlog already guarantees a wake-up
             return
         block = np.array(indata, dtype=np.float32, copy=True).reshape(-1)
+        self._captured_samples += int(block.shape[0])
         try:
             self._queue.put_nowait(block)
         except Full:
+            self._queue_overflow_count += 1
             self._capture_error = MicOverflowError(
                 "capture queue full — downstream cannot keep up; refusing "
                 "to drop audio (M2 fail-loud contract)")
+            return
+        depth = self._queue.qsize()
+        if depth > self._queue_high_water:
+            self._queue_high_water = depth
 
     def _raise_deferred(self) -> None:
         if self._capture_error is not None:
@@ -218,3 +230,22 @@ class MicSource:
 
     def stop(self) -> None:
         self.close()
+
+    def stats(self) -> dict:
+        """Read-only capture observability snapshot (plan Task 6). RTF
+        trouble must become visible here long before the bounded queue
+        reaches its hard failure boundary."""
+        return {
+            "captured_samples": self._captured_samples,
+            "captured_seconds": round(self._captured_samples / TARGET_SR, 3),
+            "emitted_samples": self._samples_emitted,
+            "emitted_seconds": round(self._samples_emitted / TARGET_SR, 3),
+            "queue_depth": self._queue.qsize() if self._queue else 0,
+            "queue_high_water": self._queue_high_water,
+            "input_overflow_count": self._status_overflow_count,
+            "queue_overflow_count": self._queue_overflow_count,
+            "selected_device": self.selected_device,
+            "sample_rate": TARGET_SR,
+            "block_ms": self.block_ms,
+            "blocksize_samples": int(TARGET_SR * self.block_ms / 1000),
+        }
