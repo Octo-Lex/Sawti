@@ -207,6 +207,61 @@ def test_transcribe_and_eval_unchanged_by_listen():
 
 # ---- hermetic replay: MicSource -> the M1 graph (plan Task 5) ----
 
+# ---- teardown reporting must never crash shutdown (Task 7 finding) ----
+
+class _StatsSrc:
+    def stats(self):
+        return {"captured_seconds": 6.6, "emitted_seconds": 6.6,
+                "queue_depth": 0, "queue_high_water": 1,
+                "input_overflow_count": 0, "queue_overflow_count": 0,
+                "selected_device": 15, "sample_rate": 16000,
+                "block_ms": 100, "blocksize_samples": 1600,
+                "captured_samples": 105600, "emitted_samples": 105600}
+
+
+def test_capture_stats_survive_broken_console_handle(monkeypatch):
+    """Task 7 real-session finding: on Windows Ctrl+C, the colorama/click
+    wrapped stderr can raise OSError 6 (invalid handle) mid-teardown —
+    the stats line was lost and a traceback replaced the clean exit. The
+    print must fall back to the raw interpreter stderr and NEVER raise."""
+    import io
+    import sys
+
+    import sawti.cli as cli
+
+    def _broken_echo(msg=None, err=False, **kw):
+        raise OSError(6, "Windows error: 6 (invalid console handle)")
+
+    raw = io.StringIO()                       # the raw-interpreter stderr
+    monkeypatch.setattr(cli.typer, "echo", _broken_echo)
+    monkeypatch.setattr(sys, "__stderr__", raw)
+    cli._print_capture_stats(_StatsSrc())      # must not raise
+    assert "[capture] 6.6s captured" in raw.getvalue()  # fallback delivered
+    assert "input overflows 0" in raw.getvalue()
+
+
+def test_capture_stats_double_failure_exits_silently(monkeypatch):
+    """Even with BOTH the wrapped echo and the raw interpreter stderr
+    broken, teardown stays clean — a lost summary beats a crashed exit."""
+    import sys
+
+    import sawti.cli as cli
+
+    def _broken_echo(msg=None, err=False, **kw):
+        raise OSError(6, "Windows error: 6")
+
+    class _BrokenRaw:
+        def write(self, *a):
+            raise OSError(6)
+
+        def flush(self):
+            raise OSError(6)
+
+    monkeypatch.setattr(cli.typer, "echo", _broken_echo)
+    monkeypatch.setattr(sys, "__stderr__", _BrokenRaw())
+    cli._print_capture_stats(_StatsSrc())      # must not raise
+
+
 def test_replay_real_mic_source_through_m1_stub_graph():
     """The load-bearing M2 proof: the REAL MicSource (fake backend
     replaying known waveform blocks through the REAL callback) feeds the

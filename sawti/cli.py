@@ -170,17 +170,38 @@ def _list_input_devices() -> None:
                        f"default {d.get('default_samplerate')} Hz)")
 
 
+def _capture_summary(src) -> str:
+    s = src.stats()
+    return ("[capture] {captured_seconds}s captured / {emitted_seconds}s "
+            "emitted | queue high-water {queue_high_water} "
+            "(now {queue_depth}) | input overflows {input_overflow_count} | "
+            "queue overflows {queue_overflow_count} | device "
+            "{selected_device} @ {sample_rate} Hz x {block_ms} ms".format(**s))
+
+
 def _print_capture_stats(src) -> None:
     """Session capture summary — stderr only, transcript stdout stays
-    machine-friendly (plan Task 6)."""
-    s = src.stats()
-    typer.echo(
-        "[capture] {captured_seconds}s captured / {emitted_seconds}s "
-        "emitted | queue high-water {queue_high_water} "
-        "(now {queue_depth}) | input overflows {input_overflow_count} | "
-        "queue overflows {queue_overflow_count} | device "
-        "{selected_device} @ {sample_rate} Hz x {block_ms} ms".format(**s),
-        err=True)
+    machine-friendly (plan Task 6).
+
+    Teardown reporting must never crash shutdown: on Windows, Ctrl+C can
+    invalidate the colorama/click-wrapped console handle mid-reset and the
+    err-write raises OSError 6 (found in the first real Task 7 session —
+    the stats line was lost and a traceback replaced the clean exit).
+    Fall back to the raw interpreter stderr; if even that is gone, exit
+    silently rather than fail teardown."""
+    msg = _capture_summary(src)
+    try:
+        typer.echo(msg, err=True)
+        return
+    except OSError:
+        pass
+    try:
+        import sys
+
+        sys.__stderr__.write(msg + "\n")
+        sys.__stderr__.flush()
+    except Exception:
+        pass  # no usable stderr left; a lost summary beats a crashed exit
 
 
 if __name__ == "__main__":
