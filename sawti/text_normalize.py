@@ -23,10 +23,26 @@ def repair_punctuation_spacing(text: str) -> str:
     return text
 
 
-def collapse_repeated_loops(text: str, min_count: int = 3) -> str:
-    """Collapse exact unigram loops repeated >= min_count times.
+def _loop_run_len(toks: list[str], s: int, n: int) -> int:
+    """Count back-to-back repeats of the n-gram at position s."""
+    run = 1
+    while (s + n * (run + 1) <= len(toks)
+           and toks[s:s + n] == toks[s + n * run:s + n * run + n]):
+        run += 1
+    return run
 
-    'the the the the' -> 'the'. Preserves intentional shorter repetitions.
+
+def collapse_repeated_loops(text: str, min_count: int = 3,
+                            max_n: int = 8) -> str:
+    """Collapse exact unigram AND n-gram loops repeated >= min_count
+    times back-to-back (spec §4.5).
+
+    'the the the the' -> 'the'; 'a b a b a b' -> 'a b';
+    'لكي نتحدث لكي نتحدث لكي نتحدث' -> 'لكي نتحدث'. The smallest repeating
+    unit that reaches min_count wins, so pure unigram runs collapse to a
+    single token exactly as before. Intentional shorter repetitions are
+    preserved ('no no, wait', 'very very important'). max_n matches the
+    gate's detector (loop_detect.is_loop, 1..8-token spans).
     """
     tokens = text.split()
     if len(tokens) < min_count:
@@ -34,15 +50,18 @@ def collapse_repeated_loops(text: str, min_count: int = 3) -> str:
     out: list[str] = []
     i = 0
     while i < len(tokens):
-        j = i + 1
-        while j < len(tokens) and tokens[j] == tokens[i]:
-            j += 1
-        run_len = j - i
-        if run_len >= min_count:
-            out.append(tokens[i])  # collapse to a single instance
-        else:
-            out.extend(tokens[i:j])
-        i = j
+        collapsed = False
+        cap = min(max_n, (len(tokens) - i) // min_count)
+        for n in range(1, cap + 1):
+            if _loop_run_len(tokens, i, n) >= min_count:
+                run = _loop_run_len(tokens, i, n)
+                out.extend(tokens[i:i + n])
+                i += n * run
+                collapsed = True
+                break
+        if not collapsed:
+            out.append(tokens[i])
+            i += 1
     return " ".join(out)
 
 

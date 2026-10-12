@@ -1,4 +1,4 @@
-from sawti.text_normalize import (
+﻿from sawti.text_normalize import (
     collapse_repeated_loops,
     normalize_arabic_for_match,
     normalize_for_match,
@@ -24,6 +24,39 @@ def test_collapse_repeated_loops_three_or_more():
 
 def test_collapse_repeated_loops_arabic():
     assert collapse_repeated_loops("مرحبا مرحبا مرحبا مرحبا", min_count=3) == "مرحبا"
+
+
+def test_collapse_repeated_loops_ngram():
+    # spec §4.5: n-gram loops collapse to ONE instance of the phrase
+    assert collapse_repeated_loops("a b a b a b", min_count=3) == "a b"
+    assert collapse_repeated_loops("x y x y x y x y", min_count=3) == "x y"
+    # two repeats stay (below min_count) even for phrases
+    assert collapse_repeated_loops("a b a b", min_count=3) == "a b a b"
+
+
+def test_collapse_repeated_loops_session_arabic_phrase_loop():
+    # The exact failure shape from the 2026-10-09 Task 7 smoke: the
+    # exhausted chunk's Whisper output looped a 5-token Arabic phrase.
+    phrase = "لكي نتحدث عن هذه المشكلة"
+    text = " ".join([phrase] * 40)
+    assert collapse_repeated_loops(text, min_count=3) == phrase
+
+
+def test_collapse_repeated_loops_mixed_runs_and_normal_text():
+    assert (collapse_repeated_loops(
+        "the the the the cat cat cat and then we left",
+        min_count=3) == "the cat and then we left")
+    # a unigram loop followed by another unigram loop in one utterance
+    assert (collapse_repeated_loops(
+        "يلا يلا يلا go go go go go", min_count=3) == "يلا go")
+
+
+def test_collapse_repeated_loops_preserves_intentional():
+    # spec §4.5 preserve-list
+    assert collapse_repeated_loops("no no, wait", min_count=3) == "no no, wait"
+    assert collapse_repeated_loops("very very important", min_count=3) == \
+        "very very important"
+    assert collapse_repeated_loops("لا لا", min_count=3) == "لا لا"
 
 
 def test_normalize_for_match_lowercases_latin():
