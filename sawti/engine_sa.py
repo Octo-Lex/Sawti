@@ -41,12 +41,10 @@ class SaudiWhisperEngine:
     """S2TTEngine over the merged Saudi Whisper export."""
 
     def __init__(self, processor, model, device: str = "cuda",
-                 mt: M4TTtTranslator | None = None,
-                 return_scores: bool = True) -> None:
+                 mt: M4TTtTranslator | None = None) -> None:
         self.processor = processor
         self.device = device
         self.mt = mt or M4TTtTranslator(device=device)
-        self.return_scores = return_scores
         if not _is_mock(model):
             model = model.to(device)  # placement failures must surface
         self.model = model
@@ -69,19 +67,21 @@ class SaudiWhisperEngine:
         if restart:
             # Degenerate recovery: block the loop detector's span class.
             gen_kwargs.update(no_repeat_ngram_size=8)
-        if self.return_scores:
-            gen_kwargs.update(return_dict_in_generate=True,
-                              output_scores=True)
+        # NOTE: no return_dict_in_generate/output_scores. Whisper's
+        # generate() in this transformers version warns those flags are
+        # invalid for it, and every native crash in the 2026-10-12 SA
+        # eval runs carried them while every stable whisper run (the
+        # frozen evaluator, the fallback provider) did not. Confidence
+        # uses the provider-lane heuristic instead (providers_sa: 0.8).
         out = self.model.generate(input_features=feats,
                                   attention_mask=mask, **gen_kwargs)
         asr_ms = (time.perf_counter() - t0) * 1000.0
         text = self.processor.tokenizer.batch_decode(
-            getattr(out, "sequences", out), skip_special_tokens=True
-        )[0].strip()
+            out, skip_special_tokens=True)[0].strip()
         # Degenerate transcripts collapse before translation and the gate
         # (the same guard the fallback lane applies at its seam).
         text = collapse_repeated_loops(text)
-        confidence = self._confidence(out)
+        confidence = 0.8
         mode = ("restart" if restart
                 else "conservative" if conservative else "primary")
         if target_lang != "ara":
@@ -103,23 +103,6 @@ class SaudiWhisperEngine:
             target_lang=target_lang,
         )
 
-    def _confidence(self, out) -> float:
-        """Mean max-softmax over decode steps (the engine_m4t convention);
-        0.8 heuristic when scores are unavailable."""
-        scores = getattr(out, "scores", None)
-        if not self.return_scores or not scores:
-            return 0.8
-        try:
-            import torch
-
-            probs = []
-            for step in scores:
-                p = torch.softmax(step, dim=-1).max(dim=-1).values
-                probs.append(float(p.mean().item()))
-            return sum(probs) / len(probs) if probs else 0.8
-        except Exception:
-            return 0.8
-
 
 def load_sa_engine(device: str = "cuda",
                    sa_model_dir: str = DEFAULT_SA_MODEL_DIR) -> SaudiWhisperEngine:
@@ -129,5 +112,6 @@ def load_sa_engine(device: str = "cuda",
 
     processor = WhisperProcessor.from_pretrained(sa_model_dir)
     model = (WhisperForConditionalGeneration.from_pretrained(
-        sa_model_dir, dtype=torch.float16).to(device).eval())
+        sa_model_dir, dtype=torch.float16,
+        low_cpu_mem_usage=True).to(device).eval())
     return SaudiWhisperEngine(processor=processor, model=model, device=device)

@@ -64,7 +64,8 @@ class SaudiWhisperM4TProvider(WhisperM4TProvider):
 
             processor = WhisperProcessor.from_pretrained(self.sa_model_dir)
             model = (WhisperForConditionalGeneration.from_pretrained(
-                self.sa_model_dir, dtype=torch.float16)
+                self.sa_model_dir, dtype=torch.float16,
+            low_cpu_mem_usage=True)
                 .to(self.device).eval())
             self._sa = (processor, model)
         return self._sa

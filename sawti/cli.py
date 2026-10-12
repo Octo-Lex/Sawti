@@ -52,6 +52,44 @@ def _sa_pipeline(config: SawtiConfig, on_decision=None) -> Pipeline:
                                on_decision=on_decision)
 
 
+def _shared_component_factory(config: SawtiConfig, engine: str):
+    """Eval factory whose heavy components are built ONCE and injected
+    into every per-clip pipeline.
+
+    The eval harness (eval/transcribers.py) builds a fresh pipeline per
+    clip — correct for state isolation (gate, postprocessor, segmenter
+    are per-clip) but catastrophic for real models: it reloads the full
+    stack per clip (~25 s of loading per ~2 s of inference, and the
+    repeated fp16 load/unload churn crashed the process natively —
+    found 2026-10-12 running the SA-mode eval). Sharing the engine and
+    provider INSTANCES keeps per-clip state semantics identical while
+    models stay resident. Uses the builder's own injection seams."""
+    if engine == "sawti-sa":
+        from sawti.engine_sa import load_sa_engine
+
+        shared_engine, kind = load_sa_engine(config.s2tt.device), "sa"
+    else:
+        from sawti.build import _load_m4t
+
+        shared_engine, kind = _load_m4t(config.s2tt.device), "m4t"
+    from sawti.providers import WhisperM4TProvider
+
+    shared_provider = WhisperM4TProvider(device=config.s2tt.device)
+
+    def factory(on_decision=None):
+        from sawti.build import build_real_pipeline
+
+        if kind == "sa":
+            return build_real_pipeline(
+                config, engine="sawti-sa", on_decision=on_decision,
+                sa_engine=shared_engine, provider=shared_provider)
+        return build_real_pipeline(
+            config, on_decision=on_decision,
+            m4t_engine=shared_engine, provider=shared_provider)
+
+    return factory
+
+
 @app.command()
 def transcribe(
     file: Path = typer.Argument(None, help="Audio file to transcribe (omit for stub demo)"),
@@ -105,12 +143,7 @@ def eval(
 
     if engine in ("real", "sawti-sa"):
         config = load_config(config_path) if config_path.exists() else SawtiConfig()
-        if engine == "real":
-            factory = lambda on_decision=None: _real_pipeline(  # noqa: E731
-                config, on_decision=on_decision)
-        else:
-            factory = lambda on_decision=None: _sa_pipeline(  # noqa: E731
-                config, on_decision=on_decision)
+        factory = _shared_component_factory(config, engine)
     else:
         # Explicit stub mode: a real execution of stub components — the
         # same seam, no models. Not a stubbed hypothesis.

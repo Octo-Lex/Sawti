@@ -112,15 +112,15 @@ def test_degenerate_transcript_collapses_before_mt():
     assert r.raw_text == "english translation"
 
 
-def test_confidence_from_scores_and_fallback():
-    scores = (torch.tensor([[0.05, 0.9, 0.05]]),)
-    model = MagicMock()
-    model.generate.return_value = MagicMock(sequences=[[1, 2]],
-                                            scores=scores)
+def test_confidence_is_heuristic_and_scores_never_requested():
+    """Whisper's generate() must never receive return_dict_in_generate/
+    output_scores (invalid flags for it; carried by every native crash
+    in the 2026-10-12 SA eval runs). Confidence is the provider-lane
+    heuristic (0.8), matching providers_sa."""
+    model = _FakeSA()
     eng = SaudiWhisperEngine(processor=_proc(), model=model, mt=_FakeMt())
     r = eng.translate(_chunk(), "ara")
-    assert 0.0 <= r.confidence <= 1.0
-    # no scores at all -> heuristic
-    eng2 = SaudiWhisperEngine(processor=_proc(), model=_FakeSA(),
-                              mt=_FakeMt(), return_scores=False)
-    assert eng2.translate(_chunk(), "ara").confidence == 0.8
+    assert r.confidence == 0.8
+    for call in model.calls:
+        assert "return_dict_in_generate" not in call
+        assert "output_scores" not in call

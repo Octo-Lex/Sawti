@@ -1,4 +1,4 @@
-"""M4T T2TT translator (thin wrapper, SA spec Task 8's reconciled shape).
+﻿"""M4T T2TT translator (thin wrapper, SA spec Task 8's reconciled shape).
 
 One lazy-resident text-to-text lane: Sawti codes in, translated text out.
 Used by the sawti-sa primary engine (engine_sa.SaudiWhisperEngine); the
@@ -27,7 +27,8 @@ class M4TTtTranslator:
 
             processor = AutoProcessor.from_pretrained(self.model_id)
             model = SeamlessM4Tv2ForTextToText.from_pretrained(
-                self.model_id).to(self.device)
+                self.model_id,
+                low_cpu_mem_usage=True).to(self.device)
             self._mt = (processor, model)
         return self._mt
 

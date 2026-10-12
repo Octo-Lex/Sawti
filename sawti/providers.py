@@ -58,7 +58,8 @@ class WhisperM4TProvider:
 
             processor = AutoProcessor.from_pretrained(self.m4t_model_id)
             model = SeamlessM4Tv2ForTextToText.from_pretrained(
-                self.m4t_model_id).to(self.device)
+                self.m4t_model_id,
+                low_cpu_mem_usage=True).to(self.device)
             self._mt = (processor, model)
         return self._mt
 

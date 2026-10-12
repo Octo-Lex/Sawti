@@ -34,7 +34,8 @@ def _load_m4t(device: str):
 
     processor = AutoProcessor.from_pretrained("facebook/seamless-m4t-v2-large")
     model = SeamlessM4Tv2ForSpeechToText.from_pretrained(
-        "facebook/seamless-m4t-v2-large")
+        "facebook/seamless-m4t-v2-large",
+        low_cpu_mem_usage=True)  # mmap weights: halves host commit
     engine = SeamlessM4TEngine(processor=processor, model=model, device=device)
     return engine
 

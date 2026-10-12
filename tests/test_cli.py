@@ -103,6 +103,43 @@ def test_eval_sawti_sa_wires_sa_factory(tmp_path, monkeypatch):
     assert "report" in result.stdout.lower()
 
 
+# ---- shared-component eval factory (2026-10-12 crash fix) ----
+
+def test_shared_component_factory_builds_heavy_parts_once(monkeypatch):
+    """The eval factory must load the engine and provider ONCE and inject
+    the same instances into every per-clip pipeline (the per-clip model
+    reload both crawled evals and crashed the SA stack natively)."""
+    from sawti import cli
+    from sawti.config import SawtiConfig
+
+    loads = {"m4t": 0, "provider": 0}
+
+    class FakeEngine:
+        def translate(self, chunk, target_lang, **kw):
+            from sawti.types import EngineResult
+            return EngineResult(chunk.id, "x", 0.9, "ara", {},
+                                target_lang)
+
+    def fake_load_m4t(device):
+        loads["m4t"] += 1
+        return FakeEngine()
+
+    class FakeProvider:
+        def __init__(self, device):
+            loads["provider"] += 1
+
+    monkeypatch.setattr("sawti.build._load_m4t", fake_load_m4t)
+    monkeypatch.setattr("sawti.providers.WhisperM4TProvider", FakeProvider)
+
+    factory = cli._shared_component_factory(SawtiConfig(), "real")
+    p1 = factory(on_decision=None)
+    p2 = factory(on_decision=None)
+    assert loads == {"m4t": 1, "provider": 1}      # built exactly once
+    # and the SAME instances ride both pipelines
+    assert p1.engine.engine is p2.engine.engine
+    assert p1.fallback.asr_mt is p2.fallback.asr_mt
+
+
 # ---- M2: sawti listen ----
 
 class FakeMicSource:
