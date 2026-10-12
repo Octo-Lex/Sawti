@@ -12,6 +12,7 @@ import time
 
 import numpy as np
 
+from sawti.text_normalize import collapse_repeated_loops
 from sawti.types import AudioChunk, EngineResult
 
 # Whisper language names -> Sawti codes (subset we support).
@@ -80,6 +81,12 @@ class WhisperM4TProvider:
         asr = self._ensure_asr()
         out = asr(audio, return_language=True)
         text = out["text"].strip()
+        # Degenerate ASR transcripts (phrase loops — the documented
+        # short-clip Whisper failure mode) collapse BEFORE translation and
+        # before the gate sees the result: the gate then judges content,
+        # not the loop, and T2TT decodes ~11 tokens instead of ~250
+        # (measured 0.8 s vs 2.8 s on the 2026-10-09 session text).
+        text = collapse_repeated_loops(text)
         raw_lang = (out.get("language") or "").lower()
         detected = _WHISPER_TO_SAWTI.get(raw_lang)
         unmapped = detected is None and bool(raw_lang)

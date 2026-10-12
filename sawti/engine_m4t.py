@@ -28,6 +28,12 @@ def _is_mock(obj) -> bool:
         return False
 
 
+# Degenerate-restart re-decode: block any 1..8-token span from repeating,
+# the exact span class loop_detect flags. Aligned by design: what the gate
+# calls a loop, the restart decode cannot produce.
+RESTART_NO_REPEAT_NGRAM = 8
+
+
 class SeamlessM4TEngine:
     def __init__(
         self,
@@ -50,7 +56,8 @@ class SeamlessM4TEngine:
         self.model = model
 
     def translate(self, chunk: AudioChunk, target_lang: str,
-                  conservative: bool = False) -> EngineResult:
+                  conservative: bool = False,
+                  restart: bool = False) -> EngineResult:
         tgt = to_m4t_lang(target_lang)
         t0 = time.perf_counter()
         # processor expects a raw audio array (float32, 16kHz mono).
@@ -70,6 +77,12 @@ class SeamlessM4TEngine:
             # beam search, no sampling — observably distinct from the
             # primary pass, no second M4T instance.
             gen_kwargs.update(num_beams=5, do_sample=False)
+        if restart:
+            # Degenerate-output recovery (in-stream): a cheap greedy
+            # re-decode with n-gram repetition blocked breaks decoder
+            # loops at PRIMARY cost — unlike the beam retry, which
+            # multiplies it ~3-5x.
+            gen_kwargs.update(no_repeat_ngram_size=RESTART_NO_REPEAT_NGRAM)
         if self.return_scores:
             gen_kwargs.update(return_dict_in_generate=True, output_scores=True)
         out = self.model.generate(**inputs, **gen_kwargs)
@@ -81,7 +94,12 @@ class SeamlessM4TEngine:
             raw_text=text,
             confidence=confidence,
             source_lang_guess=None,  # SeamlessM4T infers source; not exposed here
-            timing_ms={"engine": elapsed_ms, "path": "seamless_m4t"},
+            timing_ms={
+                "engine": elapsed_ms,
+                "path": "seamless_m4t",
+                "mode": ("restart" if restart
+                         else "conservative" if conservative else "primary"),
+            },
             target_lang=target_lang,  # report Sawti code back
         )
 

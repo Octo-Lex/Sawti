@@ -1,14 +1,27 @@
 """FallbackHandler: the single authority for escalation (spec §3.6, §5.3).
 
-Locked M1 control flow, executed in exactly this order:
+Control flow (2026-10-09: restart stage added first; otherwise locked M1),
+executed in exactly this order:
 
-    primary (evaluated by the Pipeline) -> conservative retry -> rechunk
+    primary (evaluated by the Pipeline)
+      -> restart re-decode (DEGENERATE primaries only: empty/garbage/loop;
+         greedy with repetition blocked — producer-level recovery at
+         primary cost)
+      -> conservative retry (beam search; any failure incl. low confidence)
+      -> rechunk
       -> ASR+MT provider (on the ORIGINAL chunk) -> best-effort flagged output
 
 Contract notes:
 - ``recover(chunk, primary, target_lang)`` receives the already-evaluated
   PRIMARY GateDecision (the Pipeline owns the primary attempt) and returns
   the final GateDecision.
+- **Restart is an explicit seam** (``ConservativeRetry``-compatible callable
+  bound to the engine's restart decode mode). It fires ONLY on degenerate
+  checks (empty/garbage/loop): those mean producer malfunction, where the
+  cheapest cure is a different decode of the SAME audio — not a costlier
+  one. Low-confidence failures skip straight to the beam retry, which is
+  what beam search is for. Config: ``retries.max_engine_restarts`` (0 =
+  stage off, restoring the pre-restart ladder).
 - **Conservative retry is an explicit seam** (``ConservativeRetry``). When
   none is provided the retry stage falls back to ordinary
   ``engine.translate`` (identity "conservative" mode); binding the seam to
@@ -38,6 +51,19 @@ from sawti.rechunk import Rechunker
 from sawti.types import AudioChunk, EngineResult, GateDecision
 
 
+# Producer-malfunction checks: the primary output is degenerate, so the
+# cheapest recovery is a re-decode that cannot produce the degeneracy.
+# Low-confidence / script / length failures are NOT here — they indicate
+# uncertainty, not malfunction, and belong to the beam retry.
+DEGENERATE_CHECKS = frozenset(
+    {"empty_output", "garbage_output", "repetition_loop"})
+
+
+def is_degenerate(decision: GateDecision) -> bool:
+    """True when the decision failed a producer-malfunction check."""
+    return any(decision.checks.get(k) for k in DEGENERATE_CHECKS)
+
+
 class AsrMtProvider(Protocol):
     def asr_mt(self, chunk: AudioChunk, target_lang: str) -> EngineResult: ...
 
@@ -65,6 +91,7 @@ class FallbackHandler:
         asr_mt: AsrMtProvider | None = None,
         rechunker: Rechunker | None = None,
         conservative: ConservativeRetry | None = None,
+        restart: ConservativeRetry | None = None,  # degenerate re-decode seam
         config: QualityGateConfig | None = None,
     ) -> None:
         self.engine = engine
@@ -72,6 +99,7 @@ class FallbackHandler:
         self.asr_mt = asr_mt
         self.rechunker = rechunker
         self.conservative = conservative
+        self.restart = restart
         self.config = config or QualityGateConfig()
 
     # ---- internal helpers -------------------------------------------------
@@ -110,6 +138,24 @@ class FallbackHandler:
         cfg = self.config
         trace: list[dict] = [self._entry("primary", chunk.id, primary)]
         best = primary
+
+        # Stage 1.5: in-stream degenerate recovery. A degenerate primary
+        # (empty/garbage/loop) is producer malfunction: the cheapest cure
+        # is a re-decode that cannot produce the degeneracy (greedy with
+        # n-gram repetition blocked), at PRIMARY cost. Only degenerate
+        # checks arm this stage; low confidence goes to the beam retry.
+        restarts = getattr(cfg.retries, "max_engine_restarts", 0)
+        if restarts > 0 and self.restart is not None and is_degenerate(primary):
+            for attempt in range(restarts):
+                r2 = self.restart(chunk, target_lang)
+                d2 = self._evaluate(r2, chunk, target_lang)
+                entry = self._entry("restart", chunk.id, d2)
+                entry["attempt"] = attempt + 1
+                if not d2.needs_retry:
+                    d2.fallback_path = "restart"
+                    return self._finalize(d2, trace + [entry], chunk.id)
+                trace.append(entry)
+                best = _better(best, d2)
 
         # Stage 2: conservative retries (explicit seam; identity mode when
         # no seam is bound — ordinary engine.translate). Count is

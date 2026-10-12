@@ -84,6 +84,11 @@ class SaudiWhisperM4TProvider(WhisperM4TProvider):
                               **SA_GREEDY_KWARGS)
         text = processor.tokenizer.batch_decode(
             pred, skip_special_tokens=True)[0].strip()
+        # Same degenerate-transcript guard as the stock provider: collapse
+        # phrase loops before they reach translation or the gate.
+        from sawti.text_normalize import collapse_repeated_loops
+
+        text = collapse_repeated_loops(text)
         if target_lang != "ara":
             text = self._translate(text, "ara", target_lang)
         return EngineResult(

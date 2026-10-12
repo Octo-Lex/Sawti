@@ -29,6 +29,14 @@ class S2TTConfig(BaseModel):
     load_policy: LoadPolicy = "resident"
     idle_unload_seconds: int = 300
     device: str = "cuda"
+    # Live-session hardening (2026-10-09 Task 7 findings):
+    # prewarm_fallback eagerly loads the ASR+MT lane at BUILD time so a
+    # mid-session fallback event never pays a disk->GPU load stall (the
+    # re-smoke #2 death). vram_budget_gb fails the build loudly when torch
+    # reserves more than the budget — the stack must FIT before a session
+    # starts, not thrash during one.
+    prewarm_fallback: bool = False
+    vram_budget_gb: float | None = None
 
 
 class LengthRatioConfig(BaseModel):
@@ -39,6 +47,10 @@ class LengthRatioConfig(BaseModel):
 class RetriesConfig(BaseModel):
     max_s2tt_retries: int = 1
     max_rechunk_attempts: int = 1
+    # In-stream degenerate recovery (2026-10-09): a degenerate primary
+    # (empty/garbage/loop) gets a cheap greedy re-decode with repetition
+    # blocked BEFORE any escalation. 0 restores the pre-restart ladder.
+    max_engine_restarts: int = 1
 
 
 class ChecksConfig(BaseModel):

@@ -63,6 +63,24 @@ def test_conservative_mode_passes_distinct_generation_kwargs():
     assert conservative_kwargs["do_sample"] is False
 
 
+def test_restart_mode_blocks_ngram_repetition_at_primary_cost():
+    """Restart decode: greedy (no beams) with no_repeat_ngram_size=8 —
+    cheap enough for in-stream degenerate recovery, aligned with
+    loop_detect's 1..8-token span class."""
+    from sawti.engine_m4t import RESTART_NO_REPEAT_NGRAM
+
+    processor = MagicMock()
+    model = MagicMock()
+    model.generate.return_value = [[1, 2, 3]]
+    processor.decode.return_value = "text"
+    eng = SeamlessM4TEngine(processor=processor, model=model)
+    r = eng.translate(_chunk(), target_lang="eng", restart=True)
+    kwargs = model.generate.call_args.kwargs
+    assert kwargs["no_repeat_ngram_size"] == RESTART_NO_REPEAT_NGRAM
+    assert "num_beams" not in kwargs      # primary cost, not beam cost
+    assert r.timing_ms["mode"] == "restart"
+
+
 def test_device_placement_failure_surfaces():
     """A failing .to(device) must raise, not silently continue. Uses a
     plain fake (NOT a MagicMock — the _is_mock guard intentionally skips
