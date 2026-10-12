@@ -43,25 +43,37 @@ def _real_pipeline(config: SawtiConfig, on_decision=None) -> Pipeline:
     return build_real_pipeline(config, on_decision=on_decision)
 
 
+def _sa_pipeline(config: SawtiConfig, on_decision=None) -> Pipeline:
+    """The SA primary graph (spec SA 4.2): Saudi Whisper in the PRIMARY
+    seat, stock whisper-medium as the fallback lane's second opinion."""
+    from sawti.build import build_real_pipeline
+
+    return build_real_pipeline(config, engine="sawti-sa",
+                               on_decision=on_decision)
+
+
 @app.command()
 def transcribe(
     file: Path = typer.Argument(None, help="Audio file to transcribe (omit for stub demo)"),
     target: str = typer.Option("eng", help="Target language: eng|ara|fra"),
-    engine: str = typer.Option("stub", help="stub | m4t"),
+    engine: str = typer.Option("stub", help="stub | m4t | sawti-sa"),
     config_path: Path = typer.Option(Path("config/default.yaml"), help="Config YAML"),
 ) -> None:
     """Transcribe audio to the target language."""
     from sawti.env import load_env
 
     load_env()  # entry edge: fills absent vars only — OS environment wins
-    if engine not in ("stub", "m4t"):
+    if engine not in ("stub", "m4t", "sawti-sa"):
         raise typer.BadParameter(
-            f"unsupported engine {engine!r} — expected 'stub' or 'm4t'")
+            f"unsupported engine {engine!r} — expected 'stub', 'm4t' or "
+            f"'sawti-sa'")
     configure_logging()
     config = load_config(config_path) if config_path.exists() else SawtiConfig()
-    if engine == "m4t" and file is not None:
+    if engine in ("m4t", "sawti-sa") and file is not None:
         from sawti.audio_io import FileSource
-        pipe = _real_pipeline(config)
+
+        pipe = (_real_pipeline(config) if engine == "m4t"
+                else _sa_pipeline(config))
         src = FileSource(file, frame_samples=16000)
     else:
         pipe = _stub_pipeline()
@@ -76,23 +88,29 @@ def eval(
     target: str = typer.Option("eng", help="Target language: eng|ara|fra"),
     engine: str = typer.Option(
         "stub", help="stub: real execution of stub components (no models); "
-                     "real: the full production graph (loads M4T/Whisper)"),
+                     "real: the full production graph (loads M4T/Whisper); "
+                     "sawti-sa: Saudi Whisper as the primary engine"),
     config_path: Path = typer.Option(Path("config/default.yaml"), help="Config YAML"),
 ) -> None:
     """Run the evaluation harness through a real pipeline."""
     from sawti.env import load_env
 
     load_env()  # entry edge: fills absent vars only — OS environment wins
-    if engine not in ("stub", "real"):
+    if engine not in ("stub", "real", "sawti-sa"):
         raise typer.BadParameter(
-            f"unsupported engine {engine!r} — expected 'stub' or 'real'")
+            f"unsupported engine {engine!r} — expected 'stub', 'real' or "
+            f"'sawti-sa'")
     from eval.harness import run_eval
     from eval.transcribers import make_pipeline_transcriber
 
-    if engine == "real":
+    if engine in ("real", "sawti-sa"):
         config = load_config(config_path) if config_path.exists() else SawtiConfig()
-        factory = lambda on_decision=None: _real_pipeline(  # noqa: E731
-            config, on_decision=on_decision)
+        if engine == "real":
+            factory = lambda on_decision=None: _real_pipeline(  # noqa: E731
+                config, on_decision=on_decision)
+        else:
+            factory = lambda on_decision=None: _sa_pipeline(  # noqa: E731
+                config, on_decision=on_decision)
     else:
         # Explicit stub mode: a real execution of stub components — the
         # same seam, no models. Not a stubbed hypothesis.

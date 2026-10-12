@@ -57,6 +57,52 @@ def test_transcribe_engine_typo_rejected(tmp_path):
     assert "unsupported engine" in result.output
 
 
+# ---- SA primary mode (--engine sawti-sa, 2026-10-12) ----
+
+def _with_sa_graph(monkeypatch, seen):
+    """Monkeypatch _sa_pipeline to the stub graph; records the call."""
+    from sawti import cli
+
+    def fake_sa_pipeline(config, on_decision=None):
+        seen["called"] = True
+        return cli._stub_pipeline(on_decision=on_decision)
+
+    monkeypatch.setattr(cli, "_sa_pipeline", fake_sa_pipeline)
+
+
+def test_transcribe_sawti_sa_wires_sa_pipeline(tmp_path, monkeypatch):
+    import soundfile as sf
+    wav = tmp_path / "c.wav"
+    sf.write(wav, np.zeros(16000, np.float32), 16000)
+    seen = {}
+    _with_sa_graph(monkeypatch, seen)
+    result = runner.invoke(app, ["transcribe", str(wav), "--target", "ara",
+                                 "--engine", "sawti-sa"])
+    assert result.exit_code == 0
+    assert seen.get("called") is True
+
+
+def test_transcribe_sawti_sa_without_file_stays_stub(monkeypatch):
+    """No file + sawti-sa: the stub demo runs (no models, M1 semantics)."""
+    seen = {}
+    _with_sa_graph(monkeypatch, seen)
+    result = runner.invoke(app, ["transcribe", "--target", "ara",
+                                 "--engine", "sawti-sa"])
+    assert result.exit_code == 0
+    assert "hello" in result.stdout
+    assert "called" not in seen          # stub demo, no SA pipeline built
+
+
+def test_eval_sawti_sa_wires_sa_factory(tmp_path, monkeypatch):
+    seen = {}
+    _with_sa_graph(monkeypatch, seen)
+    result = runner.invoke(
+        app, ["eval", "tests/fixtures", "--target", "ara",
+              "--engine", "sawti-sa"])
+    assert result.exit_code == 0
+    assert "report" in result.stdout.lower()
+
+
 # ---- M2: sawti listen ----
 
 class FakeMicSource:
