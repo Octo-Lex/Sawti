@@ -93,6 +93,21 @@ class WhisperM4TProvider:
         unmapped = detected is None and bool(raw_lang)
         if detected is not None and detected != target_lang:
             text = self._translate(text, detected, target_lang)
+        # Script honesty (2026-10-13, Mode 2 fix): when the result's
+        # DOMINANT script mismatches the target's expected script (e.g.
+        # mostly-Arabic output for eng — the documented partial-
+        # translation failure), the result is explicitly UNTRUSTED:
+        # confidence 0.0 + a marker, exactly like the unmapped path, so
+        # the gate/fallback treat it as a failed candidate instead of a
+        # confident success. Dominant only — Latin output containing
+        # Arabic entities is unaffected.
+        from sawti.script_detect import (dominant_script,
+                                         expected_script_for_target)
+
+        expected = expected_script_for_target(target_lang)
+        script_mismatch = bool(
+            expected is not None
+            and dominant_script(text) not in (expected, "other"))
         # UNMAPPED detected language (e.g. Whisper reports a language we
         # do not support): the ASR transcript is preserved but the result
         # is explicitly UNTRUSTED — confidence 0.0 and a marker in
@@ -101,11 +116,12 @@ class WhisperM4TProvider:
         return EngineResult(
             chunk_id=chunk.id,
             raw_text=text,
-            confidence=0.0 if unmapped else 0.8,
+            confidence=0.0 if (unmapped or script_mismatch) else 0.8,
             source_lang_guess=detected if detected is not None else (
                 raw_lang or None),
             timing_ms={"asr_mt_ms": (time.perf_counter() - t0) * 1000.0,
                        "path": "whisper+m4t",
-                       "unmapped_language": raw_lang if unmapped else None},
+                       "unmapped_language": raw_lang if unmapped else None,
+                       "script_mismatch": script_mismatch or None},
             target_lang=target_lang,
         )

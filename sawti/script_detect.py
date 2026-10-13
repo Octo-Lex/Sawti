@@ -41,3 +41,16 @@ def is_mostly_arabic(text: str) -> bool:
 
 def is_mostly_latin(text: str) -> bool:
     return dominant_script(text) == "latin"
+
+
+# The ONE mapping of target language -> expected dominant output script
+# (shared by the quality gate, the ASR+MT providers, and the fallback
+# handler's best-effort selection — single source of truth).
+_EXPECTED_SCRIPT_BY_TARGET = {"eng": "latin", "fra": "latin", "ara": "arabic"}
+
+
+def expected_script_for_target(target_lang: str) -> str | None:
+    """Expected dominant output script for a target language, or None
+    when the target is unknown (callers must treat None as 'no
+    expectation' — never as a mismatch)."""
+    return _EXPECTED_SCRIPT_BY_TARGET.get(target_lang)

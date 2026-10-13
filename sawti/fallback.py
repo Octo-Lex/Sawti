@@ -79,7 +79,39 @@ class ConservativeRetry(Protocol):
     def __call__(self, chunk: AudioChunk, target_lang: str) -> EngineResult: ...
 
 
-def _better(a: GateDecision, b: GateDecision) -> GateDecision:
+def _script_tier(decision: GateDecision, target_lang: str | None) -> int:
+    """Best-effort selection tier (2026-10-13, Mode 2 fix):
+
+    2 = dominant script matches the target's expected script
+    1 = script 'other'/unknown, or no target given, or unknown target
+    0 = dominant script MISMATCHES the target
+
+    A wrong-script candidate can no longer beat a target-script one on
+    confidence alone — the exact mechanism behind every wrong-script
+    leak in the 2026-10-12 failure analysis (the asr_mt transcript at
+    hardcoded 0.8 outscoring correct-script candidates). Empty text
+    lands in tier 1 at best ('other'), never tier 2."""
+    if not target_lang:
+        return 1
+    from sawti.script_detect import (dominant_script,
+                                     expected_script_for_target)
+
+    expected = expected_script_for_target(target_lang)
+    if expected is None:
+        return 1
+    d = dominant_script(decision.result.raw_text or "")
+    return 2 if d == expected else (1 if d == "other" else 0)
+
+
+def _better(a: GateDecision, b: GateDecision,
+            target_lang: str | None = None) -> GateDecision:
+    """Script-aware best-candidate rule: higher tier wins; ties fall to
+    the original confidence comparison. Without target_lang this is the
+    historical pure-confidence rule (every pre-2026-10-13 construction)."""
+    ta = _script_tier(a, target_lang)
+    tb = _script_tier(b, target_lang)
+    if ta != tb:
+        return a if ta > tb else b
     return a if a.result.confidence >= b.result.confidence else b
 
 
@@ -155,7 +187,7 @@ class FallbackHandler:
                     d2.fallback_path = "restart"
                     return self._finalize(d2, trace + [entry], chunk.id)
                 trace.append(entry)
-                best = _better(best, d2)
+                best = _better(best, d2, target_lang)
 
         # Stage 2: conservative retries (explicit seam; identity mode when
         # no seam is bound — ordinary engine.translate). Count is
@@ -176,7 +208,7 @@ class FallbackHandler:
                     d.fallback_path = "retry"
                     return self._finalize(d, trace + [entry], chunk.id)
                 trace.append(entry)
-                best = _better(best, d)
+                best = _better(best, d, target_lang)
 
         # Stage 3: rechunk -> COMPOSE a parent-level candidate. Rounds are
         # config-owned execution policy (retries.max_rechunk_attempts):
@@ -218,7 +250,7 @@ class FallbackHandler:
                         dc.fallback_path = "rechunk"
                         return self._finalize(dc, trace + [entry], chunk.id)
                     trace.append(entry)
-                    best = _better(best, dc)  # parent-level candidate may compete
+                    best = _better(best, dc, target_lang)  # parent-level candidate may compete
                 # Tighten for the next round when the rechunker supports it.
                 if rnd + 1 < rounds and hasattr(rc, "with_tighter"):
                     rc = rc.with_tighter(2)
@@ -231,7 +263,7 @@ class FallbackHandler:
                 dm.fallback_path = "asr_mt"
                 return self._finalize(dm, trace + [self._entry("asr_mt", chunk.id, dm)], chunk.id)
             trace.append(self._entry("asr_mt", chunk.id, dm))
-            best = _better(best, dm)
+            best = _better(best, dm, target_lang)
 
         # Stage 5: exhausted -> best-effort flagged output (parent-level
         # candidates only, by construction).

@@ -92,13 +92,25 @@ class SaudiWhisperM4TProvider(WhisperM4TProvider):
         text = collapse_repeated_loops(text)
         if target_lang != "ara":
             text = self._translate(text, "ara", target_lang)
+        # Script honesty (2026-10-13, Mode 2 fix — symmetric with the
+        # stock provider): a dominant-script mismatch against the target
+        # makes the result UNTRUSTED (conf 0.0 + marker) instead of a
+        # confident success.
+        from sawti.script_detect import (dominant_script,
+                                         expected_script_for_target)
+
+        expected = expected_script_for_target(target_lang)
+        script_mismatch = bool(
+            expected is not None
+            and dominant_script(text) not in (expected, "other"))
         return EngineResult(
             chunk_id=chunk.id,
             raw_text=text,
-            confidence=0.8,
+            confidence=0.0 if script_mismatch else 0.8,
             source_lang_guess="ara",
             timing_ms={"asr_mt_ms": (time.perf_counter() - t0) * 1000.0,
                        "path": "sa_whisper+m4t",
+                       "script_mismatch": script_mismatch or None,
                        "sa_model_dir": self.sa_model_dir},
             target_lang=target_lang,
         )
