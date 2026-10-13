@@ -1,0 +1,68 @@
+{
+  "schema": "sawti-model-registry/1",
+  "notes": "Every model and dataset the runtime, training, or evaluation touches. The CI gate (scripts/check_model_registry.py, tests/test_model_registry.py) fails the build when code references a model absent here, or a record is incomplete. commercial_use=true requires a reviewer+date+evidence; no record currently claims it. 'A gated or missing card is not permission.'",
+  "models": [
+    {
+      "id": "facebook/seamless-m4t-v2-large",
+      "role": "primary S2TT engine + T2TT fallback lane",
+      "license": "CC-BY-NC-4.0",
+      "commercial_use": false,
+      "evidence": "https://huggingface.co/facebook/seamless-m4t-v2-large",
+      "pinned_revision": null,
+      "used_by": ["sawti/build.py", "sawti/mt_m4t.py", "sawti/providers.py", "sawti/providers_sa.py"],
+      "notes": "Both core-translation seats. The binding license constraint on a commercial Sawti."
+    },
+    {
+      "id": "openai/whisper-medium",
+      "role": "fallback lane ASR (WhisperM4TProvider)",
+      "license": "Apache-2.0",
+      "commercial_use": null,
+      "evidence": "https://huggingface.co/openai/whisper-medium",
+      "pinned_revision": null,
+      "used_by": ["sawti/providers.py"],
+      "notes": "License-clean; review of exact card revision pending."
+    },
+    {
+      "id": "openai/whisper-large-v3",
+      "role": "SA fine-tune base (training only, not runtime-loaded)",
+      "license": "Apache-2.0",
+      "commercial_use": null,
+      "evidence": "https://huggingface.co/openai/whisper-large-v3",
+      "pinned_revision": null,
+      "used_by": ["sawti/training/eval_checkpoint.py", "sawti/training/export_merge.py", "sawti/training/train_qlora.py"],
+      "notes": "Training-only dependency."
+    },
+    {
+      "id": "local:models/sa_whisper_v1",
+      "role": "merged Saudi Whisper export (sawti-sa primary engine)",
+      "license": "Apache-2.0 base + SADA CC-BY-NC-SA data",
+      "commercial_use": false,
+      "evidence": "models/sa_whisper_v1/provenance.json",
+      "pinned_revision": "checkpoints/sa_qlora_run2/checkpoint-10000",
+      "used_by": ["sawti/engine_sa.py", "sawti/providers_sa.py", "sawti/training/export_merge.py"],
+      "notes": "NC inherited from SADA training data (spec SA research trajectory)."
+    },
+    {
+      "id": "silero-vad",
+      "role": "segmentation VAD",
+      "license": "MIT",
+      "commercial_use": null,
+      "evidence": "https://github.com/snakers4/silero-vad",
+      "pinned_revision": null,
+      "used_by": ["sawti/vad.py"],
+      "notes": "PyPI package silero-vad>=5.1."
+    }
+  ],
+  "datasets": [
+    {
+      "id": "MohamedRashad/SADA22",
+      "role": "Saudi ASR fine-tune + evaluation corpus",
+      "license": "CC-BY-NC-SA-4.0",
+      "commercial_use": false,
+      "evidence": "https://huggingface.co/datasets/MohamedRashad/SADA22",
+      "pinned_revision": null,
+      "used_by": ["sawti/training/data_prep.py", "spikes/"],
+      "notes": "The constraint that keeps the SA lane non-commercial."
+    }
+  ]
+}
