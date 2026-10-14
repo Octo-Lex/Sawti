@@ -26,3 +26,18 @@ def test_no_unreviewed_commercial_claims():
         for rec in reg[section]:
             if rec.get("commercial_use") is True:
                 assert rec.get("reviewer"), rec["id"]
+
+
+# ---- segmentation boundary gate logic (CI gate, 2026-10-13) -----------
+
+def test_segmentation_gate_logic():
+    from scripts.segment_boundary_eval import evaluate_gate
+
+    ok, problems = evaluate_gate(f1=0.594, covered=76, n_ref=76)
+    assert ok and problems == []
+    ok, problems = evaluate_gate(f1=0.55, covered=76, n_ref=76)
+    assert ok  # exactly at the floor passes
+    ok, problems = evaluate_gate(f1=0.549, covered=76, n_ref=76)
+    assert not ok and "below floor" in problems[0]
+    ok, problems = evaluate_gate(f1=0.9, covered=75, n_ref=76)
+    assert not ok and "never-drop" in problems[0]
