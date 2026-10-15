@@ -1,190 +1,123 @@
-SAWTI EVAL SET - READING SHEET
+SAWTI EVAL SET - READING SHEET (recordable slices: en, ar, en-ar)
 Read each clip verbatim. Pause 2-3 seconds between clips.
-Saying the clip ID before each clip is optional but helps matching.
+Optionally say the clip ID first (e.g. "en one") - it helps matching.
+French slices (fr, en-fr, mixed) are covered by the synthetic set;
+they are NOT in this sheet.
 ==================================================
 
---- 1/62  [en_01] (en) ---
+--- 1/39  [en_01] (en) ---
 I have a meeting with Julia on Thursday at three thirty, so I need to leave the office by two forty-five at the latest. Traffic on King Fahd Road is unpredictable.
 
---- 2/62  [en_02] (en) ---
+--- 2/39  [en_02] (en) ---
 The new server arrived yesterday. It has two terabytes of memory and twelve cores, which should be enough for the training runs we planned this quarter.
 
---- 3/62  [en_03] (en) ---
+--- 3/39  [en_03] (en) ---
 Honestly, I think the biggest problem isn't the model itself, it's the data. We have plenty of audio but almost nothing with clean references.
 
---- 4/62  [en_04] (en) ---
+--- 4/39  [en_04] (en) ---
 My flight lands at eleven twenty in the evening. Don't pick me up, I'll take a taxi to the hotel and meet you in the morning.
 
---- 5/62  [en_05] (en) ---
+--- 5/39  [en_05] (en) ---
 She ordered three coffees, one tea, and a bottle of water. The total came to seventy-five riyals, which honestly seems a bit expensive for five drinks.
 
---- 6/62  [en_06] (en) ---
+--- 6/39  [en_06] (en) ---
 Remember to back up your laptop before the trip. Last time the update failed and I lost two weeks of work, and I don't want that happening to you.
 
---- 7/62  [en_07] (en) ---
+--- 7/39  [en_07] (en) ---
 The apartment is on the fifth floor, second door on the left. The code for the building is four five seven nine, and the landlord's name is Mr. Khalid.
 
---- 8/62  [en_08] (en) ---
+--- 8/39  [en_08] (en) ---
 We finished the report two days early, so the manager gave the team Friday off. It was the first real break we've had since the project started in January.
 
---- 9/62  [en_09] (en) ---
+--- 9/39  [en_09] (en) ---
 I usually go running before sunrise, around five fifteen. In summer that's the only time the weather cooperates, otherwise it's thirty-eight degrees by nine in the morning.
 
---- 10/62  [en_10] (en) ---
+--- 10/39  [en_10] (en) ---
 The doctor said the results look normal, but I should drink more water and sleep at least seven hours a night. Easier said than done with the baby waking up.
 
---- 11/62  [en_11] (en) ---
+--- 11/39  [en_11] (en) ---
 This recipe needs two cups of rice, one onion, and about four hundred grams of chicken. Let it cook for twenty minutes and don't lift the lid.
 
---- 12/62  [en_12] (en) ---
+--- 12/39  [en_12] (en) ---
 The conference tickets sold out in under an hour. Next year I'm setting an alarm the minute they go on sale, because I refuse to watch the streams again.
 
---- 13/62  [ar_01] (ar) ---
+--- 13/39  [ar_01] (ar) ---
 عندي اجتماع مع مدير المشروع يوم الأربعاء الساعة العشر صباحاً، وموعد الطبيب بعده بساعتين فلا أستطيع تأجيل أي منهما.
 
---- 14/62  [ar_02] (ar) ---
+--- 14/39  [ar_02] (ar) ---
 اشتريت لابتوب جديد بألف وخمسمائة ريال، فيه ذاكرة سعة ستة عشر جيجابايت وشاشة ممتازة للتصميم.
 
---- 15/62  [ar_03] (ar) ---
+--- 15/39  [ar_03] (ar) ---
 الجامعة أعلنت أن التسجيل للفصل الصيفي يبدأ الأحد القادم، والقبول في بعض التخصصات تنافسي جداً.
 
---- 16/62  [ar_04] (ar) ---
+--- 16/39  [ar_04] (ar) ---
 والدي يسأل عنك دائماً. اتصل به نهاية هذا الأسبوع لو تقدر، لأنه يريد مشاركتك في موضوع البيت الجديد.
 
---- 17/62  [ar_05] (ar) ---
+--- 17/39  [ar_05] (ar) ---
 الحركة في الرياض صباحاً لا تحتمل، أخرج من البيت قبل السادسة والنصف وإلا وصلت متأخراً ساعة كاملة.
 
---- 18/62  [ar_06] (ar) ---
+--- 18/39  [ar_06] (ar) ---
 قرأت مقالاً مثيراً عن الذكاء الاصطناعي في الطب، يقول إن التشخيص المبكر صار أدق بثلاثين بالمئة.
 
---- 19/62  [ar_07] (ar) ---
+--- 19/39  [ar_07] (ar) ---
 المطعم الجديد في حي الملقا سعره معقول والطعام لذيذ، لكن الانتظار يوم الجمعة يصل إلى أربعين دقيقة.
 
---- 20/62  [ar_08] (ar) ---
+--- 20/39  [ar_08] (ar) ---
 أخي الصغير نجح في اختبار القيادة من المحاولة الأولى، والآن يريد سيارة والأب يقول بعد التخرج.
 
---- 21/62  [ar_09] (ar) ---
+--- 21/39  [ar_09] (ar) ---
 درجة الحرارة اليوم أربعون درجة، والرطوبة عالية جداً، لذلك أفضل البقاء في البيت حتى المغرب.
 
---- 22/62  [ar_10] (ar) ---
+--- 22/39  [ar_10] (ar) ---
 نحتاج موافقة الوزارة قبل نهاية الشهر، والوثائق الناقصة ثلاث فقط: صورة الهوية، وشهادة الميلاد، وعرضاً مالياً.
 
---- 23/62  [ar_11] (ar) ---
+--- 23/39  [ar_11] (ar) ---
 جدول الرحلة تغير مرتين هذا الأسبوع، والآن الإقلاع الساعة الواحدة بعد منتصف الليل بدل التاسعة مساءً.
 
---- 24/62  [ar_12] (ar) ---
+--- 24/39  [ar_12] (ar) ---
 الحفلة كانت رائعة، حضر أكثر من مئتي شخص، وقدم الفريق عرضاً قصيراً عن إنجازات السنة.
 
---- 25/62  [fr_01] (fr) ---
-Je vais chez le médecin mardi à quatorze heures trente. C'est la première fois que je vais dans ce nouveau cabinet près de la gare.
-
---- 26/62  [fr_02] (fr) ---
-Le train pour Lyon part à huit heures dix. Il faut acheter les billets en ligne, sinon c'est beaucoup plus cher.
-
---- 27/62  [fr_03] (fr) ---
-Mon frère habite à Montréal depuis trois ans. Il dit que l'hiver est difficile, mais le travail est très intéressant.
-
---- 28/62  [fr_04] (fr) ---
-Nous avons réservé une table pour six personnes au restaurant italien, samedi soir à vingt heures.
-
---- 29/62  [fr_05] (fr) ---
-Le nouveau téléphone coûte neuf cents euros, donc j'attends les soldes de janvier pour l'acheter.
-
---- 30/62  [fr_06] (fr) ---
-Il faut du pain, du fromage, deux kilos de tomates et une bouteille d'huile d'olive pour la recette de ce soir.
-
---- 31/62  [fr_07] (fr) ---
-La réunion est reportée à jeudi prochain parce que la directrice est en voyage d'affaires à Paris.
-
---- 32/62  [fr_08] (fr) ---
-J'ai terminé le livre en trois jours. L'histoire est triste mais très belle, surtout la fin.
-
---- 33/62  [fr_09] (fr) ---
-Le musée est fermé le lundi. On peut y aller mercredi matin, l'entrée est gratuite pour les étudiants.
-
---- 34/62  [fr_10] (fr) ---
-Mon vol retour est annulé à cause de la grève. La compagnie propose un autre avion demain à onze heures.
-
---- 35/62  [enar_01] (en-ar) ---
+--- 25/39  [enar_01] (en-ar) ---
 The deadline is next Sunday يعني ما فيه وقت, I still have three chapters to review قبل ما أسلم التقرير النهائي.
 
---- 36/62  [enar_02] (en-ar) ---
+--- 26/39  [enar_02] (en-ar) ---
 مديري الجديد very supportive, he said خذ وقتك with the migration plan بس لا تتأخر أكثر من أسبوع.
 
---- 37/62  [enar_03] (en-ar) ---
+--- 27/39  [enar_03] (en-ar) ---
 We booked the flight through Dubai, الوصول الساعة خمسة الصبح, so لا تنام قبل ما توصل الفندق.
 
---- 38/62  [enar_04] (en-ar) ---
+--- 28/39  [enar_04] (en-ar) ---
 الجوال الجديد فيه تحديث كبير للكاميرا, honestly the photos look amazing خصوصاً في الليل.
 
---- 39/62  [enar_05] (en-ar) ---
+--- 29/39  [enar_05] (en-ar) ---
 I called the bank twice اليوم, they said البطاقة الجديدة تصل خلال خمسة أيام عمل.
 
---- 40/62  [enar_06] (en-ar) ---
+--- 30/39  [enar_06] (en-ar) ---
 أمي تسأل عنك كل يوم. Send her a message لو تقدر, she wants to know متى بتزورنا في العيد.
 
---- 41/62  [enar_07] (en-ar) ---
+--- 31/39  [enar_07] (en-ar) ---
 The interview went well أعتقد, but the salary أقل من اللي كنت أتوقع باثنين وعشرين بالمئة.
 
---- 42/62  [enar_08] (en-ar) ---
+--- 32/39  [enar_08] (en-ar) ---
 خالد says the new office في الدور الثالث, bigger than the old one وأرحم للجرافيك لأن الشاشات جديدة.
 
---- 43/62  [enar_09] (en-ar) ---
+--- 33/39  [enar_09] (en-ar) ---
 I finished the Arabic course! صرت أعرف أكتب رسائل شغل بدون مساعدة, which is a huge step بالنسبة لي.
 
---- 44/62  [enar_10] (en-ar) ---
+--- 34/39  [enar_10] (en-ar) ---
 السيارة تحتاج صيانة عند الأربعين ألف كيلومتر, the dealer quoted me ألف ومئتين ريال for the full service.
 
---- 45/62  [enar_11] (en-ar) ---
+--- 35/39  [enar_11] (en-ar) ---
 Sorry I'm late, الازدحام على جسر الملك فهد كان غير طبيعي. It took me ساعة وربع for what's usually عشرين دقيقة.
 
---- 46/62  [enar_12] (en-ar) ---
+--- 36/39  [enar_12] (en-ar) ---
 الآن الفرق واضح. Before the update كان التطبيق يعلق كل يوم, now it opens in أقل من ثانيتين.
 
---- 47/62  [enar_13] (en-ar) ---
+--- 37/39  [enar_13] (en-ar) ---
 My cousin's wedding كان الشهر الماضي, أكثر من ثلاثمئة مدعو, and the food كان تنويع بين عربي وإيطالي.
 
---- 48/62  [enar_14] (en-ar) ---
+--- 38/39  [enar_14] (en-ar) ---
 الدكتور قال النتيجة طبيعية الحمد لله, just drink more water وتمرن ثلاث مرات في الأسبوع على الأقل.
 
---- 49/62  [enar_15] (en-ar) ---
+--- 39/39  [enar_15] (en-ar) ---
 The client approved the design بالاتفاق, بس طلبوا تعديلين صغيرين على الألوان before we go live الأحد.
-
---- 50/62  [enfr_01] (en-fr) ---
-The bakery near the office, la pâtisserie de Marie, opens at six, et leur pain au chocolat est incroyable honestly.
-
---- 51/62  [enfr_02] (en-fr) ---
-Je dois renouveler mon passeport before September, parce que le voyage à Genève is confirmed for the twelfth.
-
---- 52/62  [enfr_03] (en-fr) ---
-La réunion a duré deux heures. We lost the wifi au milieu de la présentation, c'était embarrassant.
-
---- 53/62  [enfr_04] (en-fr) ---
-My French is getting better. Hier j'ai passé un appel technique entier without switching to English, juste deux mots peut-être.
-
---- 54/62  [enfr_05] (en-fr) ---
-Le nouveau collègue from Lyon parle un peu arabe aussi, il a appris à Beyrouth pendant six mois.
-
---- 55/62  [enfr_06] (en-fr) ---
-The train was late again, en retard de vingt minutes, so j'ai raté la correspondance et je suis arrivé à midi moins le quart.
-
---- 56/62  [enfr_07] (en-fr) ---
-On doit réserver le restaurant avant vendredi. Table for eight, avec le menu végétarien pour deux personnes.
-
---- 57/62  [mix_01] (mixed) ---
-الاجتماع مع l'équipe de Paris is tomorrow, ونفس اليوم عندي موعد مع الحلاق at four, so أعتمد عليك تاخذ الأولاد من المدرسة.
-
---- 58/62  [mix_02] (mixed) ---
-Bonjour! صباح الخير. The demo starts dans dix minutes, كل شيء جاهز؟
-
---- 59/62  [mix_03] (mixed) ---
-J'ai commandé le câble from Amazon الأحد الماضي, واليوم وصل أخيراً, mais il est trop court d'un mètre.
-
---- 60/62  [mix_04] (mixed) ---
-الترقية صارت في janvier, والنتيجة were better than expected بفارق خمسة عشر بالمئة.
-
---- 61/62  [mix_05] (mixed) ---
-Notre voisin, أبو خالد, fixed my car pendant le week-end et il a refusé l'argent, so I baked him a cake أمس.
-
---- 62/62  [mix_06] (mixed) ---
-The certificate expires في نهاية الشهر. Renewal fees are quatre-vingt dollars, والمعاملة تاخذ ثلاث أيام عمل.
